@@ -1,4 +1,4 @@
-accounts.db
+*.db
 *.session
 *.session-journal
 # Byte-compiled / optimized / DLL files

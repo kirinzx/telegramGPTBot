@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types.reply_keyboard import ReplyKeyboardMarkup
@@ -8,7 +9,7 @@ from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from telethon import TelegramClient
 from classes import User
-from checkUsers import getChannels
+from checkUsers import getUsersClient
 import aiosqlite
 import os
 
@@ -40,23 +41,33 @@ async def start(message:types.Message):
 
 @dp.message_handler(Text(equals="Посмотреть добавленные аккаунты"))
 async def getAccounts(message:types.Message):
-    async with aiosqlite.connect("accounts.db") as db:
-        async with db.execute("SELECT phoneNumber FROM users;") as cursor:
-            accounts = await cursor.fetchall()
-    if len(accounts) > 0:
-        accountsStr = "\n".join([nickname[0] for nickname in accounts])
-        await message.answer(text=accountsStr,reply_markup=keyboardMain)
-    else:
-        await message.answer(text="Аккаунтов нет...",reply_markup=keyboardMain)
+    try:
+        async with aiosqlite.connect("accounts.db") as db:
+            async with db.execute("SELECT phoneNumber FROM users;") as cursor:
+                accounts = await cursor.fetchall()
+        if len(accounts) > 0:
+            accountsStr = "\n".join([nickname[0] for nickname in accounts])
+            await message.answer(text=accountsStr,reply_markup=keyboardMain)
+        else:
+            await message.answer(text="Аккаунтов нет...",reply_markup=keyboardMain)
+    except:
+        await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
 
 @dp.message_handler(Text(equals="Добавить аккаунт"))
 async def addAccount(message:types.Message):
     await UserForm.phoneNumber.set()
-    await message.answer(text="Напишите номер телефона аккаунт(с кодом страны):",reply_markup=keyboardCancel)
+    await message.answer(text="Напишите номер телефона(с кодом страны)",reply_markup=keyboardCancel)
 
 @dp.message_handler(Text(equals="Как я работаю?"))
 async def getHelp(message:types.Message):
-    await message.answer(text="Добавьте аккаунты и я начну комментировать их посты:",reply_markup=keyboardMain)
+    await message.answer(text="""
+    Вы добавляете аккаунт, и я от лица вашего аккаунта начинаю комментировать все новые посты во всех каналах, на которые подписан акккаунт.\n
+    Что нужно для того, чтобы добавить аккаунт?
+    1. Номер телефона\n
+    2. API_ID и API_HASH. Как их получить? Заходим на сайт https://my.telegram.org/. Это официаьный сайт телеграма. В нём мы создаемновое приложение, после получаем API_ID и API_HASH.\n
+    3. Доступ к телеграм аккаунту. Вам на аккаунт придет код, необходимый для работы.\n
+    Вот и все! Теперь я начинаю комментировать....
+    """,reply_markup=keyboardMain)
 
 @dp.message_handler(Text(equals="На главную"))
 async def goHome(message:types.Message):
@@ -91,33 +102,76 @@ async def process_app_id(message: types.Message, state: FSMContext):
 async def process_app_hash(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['app_hash'] = message.text
-        userTMP = (data["phoneNumber"],data["app_id"],data["app_hash"])
-        try:
-            async with aiosqlite.connect("accounts.db")as db:
-                await db.execute("INSERT INTO users (phoneNumber,app_id,app_hash) VALUES(?,?,?);",userTMP)
-                await db.commit()
-            global client, user
-            user = User(userTMP[0],userTMP[1],userTMP[2])
-            client = TelegramClient(session=f'sessions/{data["phoneNumber"]}',api_id=data["app_id"],api_hash=data["app_hash"])
-            await client.connect()
-            if not await client.is_user_authorized():
-                await client.send_code_request(phone=data["phoneNumber"])
-                await message.answer("Введите код, который пришел вам в телеграм!",reply_markup=keyboardCancel)
-                await state.finish()
-                await AccessCodeForm.code.set()
-            else:
-                await message.answer("Готово!",reply_markup=keyboardMain)
-                await state.finish()
-        except aiosqlite.IntegrityError:
-            await message.answer("Ошибка!Аккаунт с таким никнеймом уже существует!",reply_markup=keyboardMain)
+        global client, user
+        user = User(data["phoneNumber"], data["app_id"], data["app_hash"])
+    try:
+        client = TelegramClient(session=f'sessions/{user.phoneNumber}', api_id=int(user.app_id),
+                                api_hash=str(user.app_hash))
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.send_code_request(phone=data["phoneNumber"])
+            await message.answer("Введите код, который пришел вам в телеграм", reply_markup=keyboardCancel)
             await state.finish()
+            await AccessCodeForm.code.set()
+        else:
+            try:
+                async with aiosqlite.connect("accounts.db") as db:
+                    await db.execute("INSERT INTO users (phoneNumber,app_id,app_hash) VALUES(?,?,?);", (user.phoneNumber, user.app_id, user.app_hash))
+                    await db.commit()
+                await client.disconnect()
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(None, startCheckingNewUser, user.phoneNumber, user.app_id, user.app_hash)
+                await message.answer("Готово!", reply_markup=keyboardMain)
+                await state.finish()
+            except aiosqlite.IntegrityError:
+                try:
+                    await os.remove(f"sessions/{user.phoneNumber}.session")
+                except:
+                    pass
+                await message.answer("Ошибка!Аккаунт с такими данными уже существует!", reply_markup=keyboardMain)
+                await state.finish()
+    except:
+        try:
+            await os.remove(f"sessions/{user.phoneNumber}.session")
+        except:
+            pass
+        await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
+        await state.finish()
 @dp.message_handler(state=AccessCodeForm.code)
 async def process_code(message: types.Message, state: FSMContext):
     global user
-    await client.sign_in(user.phoneNumber,message.text)
-    await message.answer("Готово!",reply_markup=keyboardMain)
-    await state.finish()
-    await getChannels(client)
+    try:
+        await client.sign_in(user.phoneNumber,message.text)
+        try:
+            async with aiosqlite.connect("accounts.db") as db:
+                await db.execute("INSERT INTO users (phoneNumber,app_id,app_hash) VALUES(?,?,?);",
+                                 (user.phoneNumber, user.app_id, user.app_hash))
+                await db.commit()
+            await client.disconnect()
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, startCheckingNewUser, user.phoneNumber, user.app_id, user.app_hash)
+            await message.answer("Готово!", reply_markup=keyboardMain)
+            await state.finish()
+        except aiosqlite.IntegrityError:
+            try:
+                await os.remove(f"sessions/{user.phoneNumber}.session")
+            except:
+                pass
+            await message.answer("Ошибка!Аккаунт с такими данными уже существует!", reply_markup=keyboardMain)
+            await state.finish()
+    except:
+        try:
+            await os.remove(f"sessions/{user.phoneNumber}.session")
+        except:
+            pass
+        await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
+        await state.finish()
+
+def startCheckingNewUser(phoneNumber,app_id,app_hash):
+    thread = threading.Thread(target=getUsersClient, args=(phoneNumber, app_id, app_hash))
+    thread.start()
+    thread.join()
+
 
 def main():
     loop = asyncio.new_event_loop()
