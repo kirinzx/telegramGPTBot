@@ -2,13 +2,14 @@ import asyncio
 import threading
 
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types.reply_keyboard import ReplyKeyboardMarkup
+from aiogram.types import ReplyKeyboardMarkup
+from aiogram.types.inline_keyboard import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from telethon import TelegramClient
-from classes import User
+from classes import User, Paginator
 from checkUsers import getUsersClient
 import aiosqlite
 import os
@@ -41,17 +42,35 @@ async def start(message:types.Message):
 
 @dp.message_handler(Text(equals="Посмотреть добавленные аккаунты"))
 async def getAccounts(message:types.Message):
+    # try:
+    async with aiosqlite.connect("accounts.db") as db:
+        async with db.execute("SELECT phoneNumber FROM users;") as cursor:
+            accounts = await cursor.fetchall()
+    if len(accounts) > 0:
+        accountsButtons = InlineKeyboardMarkup()
+        for account in accounts:
+            accountsButtons.add(InlineKeyboardButton(text=str(account[0]),callback_data=\
+                f"view {str(account[0])}"),InlineKeyboardButton(text="Удалить",callback_data=f"Удалить {str(account[0])}"))
+        paginator = Paginator(accountsButtons,size=5,dp=dp)
+        await message.answer(text="Добавленные аккаунты. Чтобы удалить, нажмите на кнопку удаления",reply_markup=paginator())
+    else:
+        await message.answer(text="Аккаунтов нет...",reply_markup=keyboardMain)
+    # except:
+    #     await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('Удалить'))
+async def proccess_callback_deleteUser(callback_query: types.CallbackQuery):
+    userToDelete = callback_query.data.split(" ")[-1]
     try:
         async with aiosqlite.connect("accounts.db") as db:
-            async with db.execute("SELECT phoneNumber FROM users;") as cursor:
-                accounts = await cursor.fetchall()
-        if len(accounts) > 0:
-            accountsStr = "\n".join([nickname[0] for nickname in accounts])
-            await message.answer(text=accountsStr,reply_markup=keyboardMain)
-        else:
-            await message.answer(text="Аккаунтов нет...",reply_markup=keyboardMain)
+            await db.execute("DELETE FROM users WHERE phoneNumber=?;",(userToDelete,))
+            await db.commit()
+        for thread in threading.enumerate():
+            if f"user_{userToDelete}-Thread" in thread.name:
+                pass
+        await bot.send_message(callback_query.from_user.id,text=f"Готово! Пользователь {userToDelete} удалён!",reply_markup=keyboardMain)
     except:
-        await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
+         await bot.send_message(callback_query.from_user.id,text="Непридвиденная ошибка!", reply_markup=keyboardMain)
 
 @dp.message_handler(Text(equals="Добавить аккаунт"))
 async def addAccount(message:types.Message):
@@ -114,22 +133,7 @@ async def process_app_hash(message: types.Message, state: FSMContext):
             await state.finish()
             await AccessCodeForm.code.set()
         else:
-            try:
-                async with aiosqlite.connect("accounts.db") as db:
-                    await db.execute("INSERT INTO users (phoneNumber,app_id,app_hash) VALUES(?,?,?);", (user.phoneNumber, user.app_id, user.app_hash))
-                    await db.commit()
-                await client.disconnect()
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(None, startCheckingNewUser, user.phoneNumber, user.app_id, user.app_hash)
-                await message.answer("Готово!", reply_markup=keyboardMain)
-                await state.finish()
-            except aiosqlite.IntegrityError:
-                try:
-                    await os.remove(f"sessions/{user.phoneNumber}.session")
-                except:
-                    pass
-                await message.answer("Ошибка!Аккаунт с такими данными уже существует!", reply_markup=keyboardMain)
-                await state.finish()
+            await saveUser(message,state)
     except:
         try:
             await os.remove(f"sessions/{user.phoneNumber}.session")
@@ -142,29 +146,32 @@ async def process_code(message: types.Message, state: FSMContext):
     global user
     try:
         await client.sign_in(user.phoneNumber,message.text)
-        try:
-            async with aiosqlite.connect("accounts.db") as db:
-                await db.execute("INSERT INTO users (phoneNumber,app_id,app_hash) VALUES(?,?,?);",
-                                 (user.phoneNumber, user.app_id, user.app_hash))
-                await db.commit()
-            await client.disconnect()
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(None, startCheckingNewUser, user.phoneNumber, user.app_id, user.app_hash)
-            await message.answer("Готово!", reply_markup=keyboardMain)
-            await state.finish()
-        except aiosqlite.IntegrityError:
-            try:
-                await os.remove(f"sessions/{user.phoneNumber}.session")
-            except:
-                pass
-            await message.answer("Ошибка!Аккаунт с такими данными уже существует!", reply_markup=keyboardMain)
-            await state.finish()
+        await saveUser(message, state)
     except:
         try:
             await os.remove(f"sessions/{user.phoneNumber}.session")
         except:
             pass
         await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
+        await state.finish()
+
+async def saveUser(message: types.Message,state: FSMContext):
+    try:
+        async with aiosqlite.connect("accounts.db") as db:
+            await db.execute("INSERT INTO users (phoneNumber,app_id,app_hash) VALUES(?,?,?);",
+                             (user.phoneNumber, user.app_id, user.app_hash))
+            await db.commit()
+        await client.disconnect()
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, startCheckingNewUser, user.phoneNumber, user.app_id, user.app_hash)
+        await message.answer("Готово!", reply_markup=keyboardMain)
+        await state.finish()
+    except aiosqlite.IntegrityError:
+        try:
+            await os.remove(f"sessions/{user.phoneNumber}.session")
+        except:
+            pass
+        await message.answer("Ошибка!Аккаунт с такими данными уже существует!", reply_markup=keyboardMain)
         await state.finish()
 
 def startCheckingNewUser(phoneNumber,app_id,app_hash):
