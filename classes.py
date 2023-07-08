@@ -1,5 +1,5 @@
+import sqlite3
 import threading
-
 from aiogram import Dispatcher, types
 from aiogram.types import CallbackQuery
 from aiogram.types.inline_keyboard import InlineKeyboardMarkup, InlineKeyboardButton
@@ -8,14 +8,16 @@ from typing import Iterable, Any, Iterator, Callable, Coroutine, Tuple
 from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher.filters.state import State
 from aiogram.dispatcher import FSMContext
-
+from telethon import TelegramClient, events
+import asyncio
+import random
+from chatGPTReq import req
 
 class User:
     def __init__(self,phoneNumber,app_id,app_hash):
         self.phoneNumber = phoneNumber
         self.app_id = app_id
         self.app_hash = app_hash
-
 
 class Paginator:
     def __init__(
@@ -200,8 +202,44 @@ class Paginator:
             )
 
 
-class ThreadWithException(threading.Thread):
-    def __init__(self):
-        threading.Thread.__init__(self)
+class UserChecking:
+    def __init__(self,session, app_id, app_hash):
+        self.session = session
+        self.event = threading.Event()
+        self.client : TelegramClient = None
+        self.app_id = app_id
+        self.app_hash = app_hash
+        self.thread = threading.Thread(target=self.startParsing, args=(self.session, self.app_id, self.app_hash),
+                                       name=f"user_{self.session}-Thread")
+        self.thread.start()
+    def startParsing(self, session, app_id, app_hash):
+        self.setClient(session, app_id, app_hash)
+        self.client.start()
+        try:
+            self.client.run_until_disconnected()
+        except sqlite3.OperationalError:
+            return
+
+    async def getChannels(self):
+        async with self.client:
+            for dialog in await self.client.get_dialogs():
+                if dialog.is_channel:
+                    await self.checkPosts(dialog)
+
+    async def checkPosts(self, channel):
+        @self.client.on(events.NewMessage(chats=channel.id))
+        async def handler(event):
+            message = await req(event.text)
+            try:
+                await asyncio.sleep(random.randint(120, 300))
+                await self.client.send_message(entity=channel, message=message, comment_to=event)
+            except:
+                 pass
+
+    def setClient(self,session, app_id, app_hash):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self.client = TelegramClient(session=f"sessions/{session}", api_id=int(app_id), api_hash=app_hash, loop=loop)
+        self.client.loop.run_until_complete(self.getChannels())
     def stop(self):
-        pass
+        self.client.disconnect()
