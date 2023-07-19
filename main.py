@@ -1,13 +1,17 @@
-import telegramBot
+from telegramBot import main as tgMain
 import threading
 import sqlite3
 from classes import UserChecking
 from typing import List
 
+#Чтобы поменять время ожидания, изменяйте файл timeToWait.txt. Первая строка - нижняя граница, Вторая строка - верхняя граница времени.
+#Например, мы хотим, чтобы было время ожидания от 3.5 до 6 минут.
+#Тогда переводим это все в секунды и 210(3.5 * 60) пишем на первой строчке, а 360(6*60) на второй.
+
 usersToCheck : List[UserChecking] = []
 
 def main():
-    tgBot = threading.Thread(target=telegramBot.main,name="tgBot-Thread")
+    tgBot = threading.Thread(target=tgMain,name="tgBot-Thread")
     tgBot.start()
     con = sqlite3.connect("accounts.db")
     cur = con.cursor()

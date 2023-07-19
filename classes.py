@@ -11,6 +11,7 @@ from aiogram.dispatcher import FSMContext
 from telethon import TelegramClient, events
 import asyncio
 import random
+import aiofiles
 from chatGPTReq import req
 
 class User:
@@ -206,9 +207,9 @@ class UserChecking:
     def __init__(self,session, app_id, app_hash):
         self.session = session
         self.event = threading.Event()
-        self.client : TelegramClient = None
         self.app_id = app_id
         self.app_hash = app_hash
+        self.channels = []
         self.thread = threading.Thread(target=self.startParsing, args=(self.session, self.app_id, self.app_hash),
                                        name=f"user_{self.session}-Thread")
         self.thread.start()
@@ -222,19 +223,28 @@ class UserChecking:
 
     async def getChannels(self):
         async with self.client:
-            for dialog in await self.client.get_dialogs():
-                if dialog.is_channel:
-                    await self.checkPosts(dialog)
+            while True:
+                for dialog in await self.client.get_dialogs():
+                    if dialog.is_channel and (not dialog.id in self.channels):
+                        self.channels.append(dialog.id)
+                        await self.checkPosts(dialog)
 
     async def checkPosts(self, channel):
         @self.client.on(events.NewMessage(chats=channel.id))
         async def handler(event):
             message = await req(event.text)
             try:
-                await asyncio.sleep(random.randint(120, 300))
-                await self.client.send_message(entity=channel, message=message, comment_to=event)
+                async with aiofiles.open("chanceToComment.txt",mode="r")as file:
+                    chance = await file.read()
+                if random.random() < float(int(chance) / 100):
+                    timeToWait = []
+                    async with aiofiles.open("timeToWait.txt",mode="r")as file:
+                        async for line in file:
+                            timeToWait.append(int(line))
+                    await asyncio.sleep(random.randint(timeToWait[0],timeToWait[1]))
+                    await self.client.send_message(entity=channel, message=message, comment_to=event)
             except:
-                 pass
+                pass
 
     def setClient(self,session, app_id, app_hash):
         loop = asyncio.new_event_loop()

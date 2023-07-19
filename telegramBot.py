@@ -1,8 +1,5 @@
 import asyncio
-import threading
-
 from middlewares import AdminMiddleware
-from main import usersToCheck
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import ReplyKeyboardMarkup
 from aiogram.types.inline_keyboard import InlineKeyboardMarkup, InlineKeyboardButton
@@ -12,11 +9,13 @@ from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from telethon import TelegramClient
 from classes import User, Paginator, UserChecking
+from config import BOT_TOKEN
+import aiofiles
 import aiosqlite
 import os
 
 storage = MemoryStorage()
-bot = Bot(token=os.environ.get("API_TOKEN"))
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot,storage=storage)
 
 keyboardCancel = ReplyKeyboardMarkup(keyboard=[
@@ -26,6 +25,7 @@ keyboardCancel = ReplyKeyboardMarkup(keyboard=[
 keyboardMain = ReplyKeyboardMarkup(keyboard=[
     [r'Добавить "админа"',"Добавить аккаунт для комментирования"],
     ["Как я работаю?"],
+    ["Изменить шанс комментирования","Изменить время ожидания","Изменить запрос к chatgpt"],
     [r'Посмотреть "админов"',"Посмотреть добавленные аккаунты"]
 ],resize_keyboard=True)
 
@@ -41,12 +41,31 @@ class UserForm(StatesGroup):
     app_id = State()
     app_hash = State()
 
+class TimeToWaitForm(StatesGroup):
+    timeLowRange = State()
+    timeHighRange = State()
+
+class RequestForm(StatesGroup):
+    request = State()
+
+class ChanceForm(StatesGroup):
+    chance = State()
+
 class AccessCodeForm(StatesGroup):
     code = State()
 
 @dp.message_handler(commands="start")
 async def start(message:types.Message):
-    await message.answer(text="Выберите опцию.",reply_markup=keyboardMain)
+    timeToWait = []
+    async with aiofiles.open("timeToWait.txt",mode="r")as file:
+        async for line in file:
+            timeToWait.append(int(line))
+    prompt = ""
+    async with aiofiles.open("chatGPTRequest.txt",mode="r",encoding="utf-8")as file:
+        prompt = await file.read()
+    async with aiofiles.open("chanceToComment.txt",mode="r")as file:
+        chance = await file.read()
+    await message.answer(text=f"Выберите опцию. Ваше текущее время ожидания: от {timeToWait[0] / 60} мин. до {timeToWait[1] / 60} мин.\nВаш запрос к chatgpt выглядит так($$ - это текст поста):\n{prompt}\n\nВаш шанс оставить комментарий: {chance}%",reply_markup=keyboardMain)
 
 @dp.message_handler(Text(equals='Отменить'), state='*')
 async def cancel_handler(message: types.Message, state: FSMContext):
@@ -55,6 +74,76 @@ async def cancel_handler(message: types.Message, state: FSMContext):
         return
     await state.finish()
     await message.reply('Отменено', reply_markup=keyboardMain)
+
+@dp.message_handler(Text(equals="Изменить шанс комментирования"))
+async def changeChance_start(message: types.Message):
+    await ChanceForm.chance.set()
+    await message.answer(text="Напишите шанс комментирования в процентах, но без знака процента. Пример: 50. Важно! Число процентов не должно превышать 100 и быть меньше 0",reply_markup=keyboardCancel)
+
+@dp.message_handler(state=ChanceForm.chance)
+async def process_chance(message: types.Message, state: FSMContext):
+    chance = message.text.strip()
+    try:
+        if chance.isdigit():
+            if 0 <= int(chance) <= 100:
+                async with aiofiles.open("chanceToComment.txt",mode="w")as file:
+                    await file.write(chance)
+                await message.answer(text="Готово!",reply_markup=keyboardMain)
+            else:
+                await message.answer(text="Некорректные данные!",reply_markup=keyboardMain)
+        else:
+            await message.answer(text="Некорректные данные!",reply_markup=keyboardMain)
+    except:
+        await message.answer(text="Непредвиденная ошибка!",reply_markup=keyboardMain)
+    finally:
+        await state.finish()
+
+@dp.message_handler(Text(equals="Изменить запрос к chatgpt"))
+async def changeRequest_start(message: types.Message):
+    await RequestForm.request.set()
+    await message.answer(text='Напишите желаемый запрос к chatgpt. ОБЯЗАТЕЛЬНО! Где должен быть текст поста, поставьте эти символы - "$$"(без кавычек). При отсутствии этих символов, изменение не будет выполнено',reply_markup=keyboardCancel)
+
+@dp.message_handler(state=RequestForm.request)
+async def process_request(message: types.Message, state: FSMContext):
+    request = message.text.strip()
+    if request.find("$$") != -1:
+        async with aiofiles.open("chatGPTRequest.txt",mode="w",encoding="utf-8")as file:
+            await file.write(request)
+        await message.answer(text='Готово!',reply_markup=keyboardMain)
+    else:
+        await message.answer(text='Ошибка! Символы "$$" не найдены',reply_markup=keyboardMain)
+    await state.finish()
+
+@dp.message_handler(Text(equals="Изменить время ожидания"))
+async def timeChange_start(message: types.Message):
+    await TimeToWaitForm.timeLowRange.set()
+    await message.answer(text="Напишите нижнюю границу времени в минутах. Если пишите нецелое кол-во минут, то пишите через точку(например, 2.5)",reply_markup=keyboardCancel)
+
+@dp.message_handler(state=TimeToWaitForm.timeLowRange)
+async def process_timeLowRange(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data["timeLowRange"] = message.text.strip()
+    await TimeToWaitForm.next()
+    await message.reply(text="Напишите верхнюю границу времени в минутах. Если пишите нецелое кол-во минут, то пишите через точку(например, 2.5)",reply_markup=keyboardCancel)
+
+@dp.message_handler(state=TimeToWaitForm.timeHighRange)
+async def process_timeHighRange(message: types.Message, state: FSMContext):
+    try:
+        async with state.proxy() as data:
+            tmp1 = float(data["timeLowRange"])
+            tmp2 = float(message.text.strip())
+        if tmp1 <= tmp2:
+            async with aiofiles.open("timeToWait.txt","w")as file:
+                await file.write(f"{int(tmp1 * 60)}\n")
+                await file.write(f"{int(tmp2 * 60)}")
+            await message.reply(text=f"Готово!Ваше текущее ожидание: от {tmp1} мин. до {tmp2} мин.",reply_markup=keyboardMain)
+        else:
+            await message.reply(text="Ошибка! Ваша нижняя граница больше верхней. Повторите снова",reply_markup=keyboardMain)
+    except:
+        await message.reply(text="Непридвиденная ошибка",reply_markup=keyboardMain)
+    finally:
+        await state.finish()
+
 @dp.message_handler(Text(equals=r'Посмотреть "админов"'))
 async def getAdmins(message:types.Message):
     async with aiosqlite.connect("accounts.db")as db:
@@ -63,9 +152,14 @@ async def getAdmins(message:types.Message):
     if len(admins) > 0:
         adminsButtons = InlineKeyboardMarkup()
         for admin in admins:
-            adminsButtons.add(InlineKeyboardButton(text=str(admin[0]), callback_data=f"view {admin[0]}"),
-                              InlineKeyboardButton(text=str(admin[1]),callback_data=f"view {admin[1]}"),
-                              InlineKeyboardButton(text="Удалить", callback_data=f"Удалить админа {str(admin[0])}"))
+            if admin[1] == str(message.from_user.id):
+                adminsButtons.add(InlineKeyboardButton(text=str(admin[0]), callback_data=f"view {admin[0]}"),
+                                  InlineKeyboardButton(text=str(admin[1]), callback_data=f"view {admin[1]}"),
+                                  InlineKeyboardButton(text="-", callback_data=f"fake-delete {admin[0]}"))
+            else:
+                adminsButtons.add(InlineKeyboardButton(text=str(admin[0]), callback_data=f"view {admin[0]}"),
+                                  InlineKeyboardButton(text=str(admin[1]),callback_data=f"view {admin[1]}"),
+                                  InlineKeyboardButton(text="Удалить", callback_data=f"Удалить админа {admin[0]}"))
         paginator = Paginator(adminsButtons, size=5, dp=dp)
         await message.answer(text="Добавленные админы. Чтобы удалить, нажмите на кнопку удаления",reply_markup=paginator())
     else:
@@ -88,7 +182,8 @@ async def proccess_callback_deleteAdmin(callback_query: types.CallbackQuery):
 @dp.message_handler(Text(equals='Добавить "админа"'))
 async def addAdmin(message:types.Message):
     await AdminForm.phoneNumberAdmin.set()
-    await message.answer("Напишите номер телефона(с кодом страны)",reply_markup=keyboardCancel)
+    await message.answer("Напишите никнейм для этого аккаунта",reply_markup=keyboardCancel)
+
 @dp.message_handler(state=AdminForm.phoneNumberAdmin)
 async def proccess_phoneNumberAdmin(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
@@ -123,7 +218,7 @@ async def getAccounts(message:types.Message):
             accountsButtons = InlineKeyboardMarkup()
             for account in accounts:
                 accountsButtons.add(InlineKeyboardButton(text=str(account[0]),callback_data=\
-                    f"view {str(account[0])}"),InlineKeyboardButton(text="Удалить",callback_data=f"Удалить аккаунт{str(account[0])}"))
+                    f"view {str(account[0])}"),InlineKeyboardButton(text="Удалить",callback_data=f"Удалить аккаунт {str(account[0])}"))
             paginator = Paginator(accountsButtons,size=5,dp=dp)
             await message.answer(text="Добавленные аккаунты. Чтобы удалить, нажмите на кнопку удаления",reply_markup=paginator())
         else:
@@ -135,6 +230,7 @@ async def getAccounts(message:types.Message):
 async def proccess_callback_deleteUser(callback_query: types.CallbackQuery):
     userToDelete = callback_query.data.split(" ")[-1]
     try:
+        from main import usersToCheck
         for i in range(len(usersToCheck)):
             if usersToCheck[i].session == userToDelete:
                 usersToCheck[i].stop()
@@ -160,8 +256,10 @@ async def getHelp(message:types.Message):
     Вы добавляете аккаунт, и я от лица вашего аккаунта начинаю комментировать все новые посты во всех каналах, на которые подписан акккаунт.\n
     Что нужно для того, чтобы добавить аккаунт?
     1. Номер телефона\n
-    2. API_ID и API_HASH. Как их получить? Заходим на сайт https://my.telegram.org/. Это официаьный сайт телеграма. В нём мы создаемновое приложение, после получаем API_ID и API_HASH.\n
+    2. API_ID и API_HASH. Как их получить? Заходим на сайт https://my.telegram.org/. Это официаьный сайт телеграма. В нём мы создаем новое приложение, после получаем API_ID и API_HASH.\n
     3. Доступ к телеграм аккаунту. Вам на аккаунт придет код, необходимый для работы.\n
+    Вы можете изменить время ожидания перед комментированием, для этого просто нажмите на соответствующую кнопку и введите сначала нижнюю границу (минимальное кол-во минут), потом верхнюю(максимальное кол-во минут)\n
+    Кто такие Админы? Это те люди, которые могут пользоваться ботом\n
     Вот и все! Теперь я начинаю комментировать....
     """,reply_markup=keyboardMain)
 
@@ -230,6 +328,7 @@ async def saveUser(message: types.Message,state: FSMContext):
         await state.finish()
 
 def startCheckingNewUser(phoneNumber,app_id,app_hash):
+    from main import usersToCheck
     usersToCheck.append(UserChecking(phoneNumber,app_id, app_hash))
 
 async def removeSessionFile(sessionName):
