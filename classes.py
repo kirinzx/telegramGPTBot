@@ -1,4 +1,4 @@
-import sqlite3
+import aiosqlite
 import threading
 from aiogram import Dispatcher, types
 from aiogram.types import CallbackQuery
@@ -9,16 +9,25 @@ from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher.filters.state import State
 from aiogram.dispatcher import FSMContext
 from telethon import TelegramClient, events
+from telethon.types import Channel
 import asyncio
 import random
 import aiofiles
 from chatGPTReq import req
+from config import readFile, writeFile
+import python_socks
+import async_timeout
+import socks
 
 class User:
-    def __init__(self,phoneNumber,app_id,app_hash):
+    def __init__(self,phoneNumber,app_id,app_hash,ip,port,login,password):
         self.phoneNumber = phoneNumber
         self.app_id = app_id
         self.app_hash = app_hash
+        self.ip = ip
+        self.port = port
+        self.login = login
+        self.password = password
 
 class Paginator:
     def __init__(
@@ -204,52 +213,72 @@ class Paginator:
 
 
 class UserChecking:
-    def __init__(self,session, app_id, app_hash):
+    def __init__(self,session, app_id, app_hash,ip,port,login,password):
         self.session = session
         self.event = threading.Event()
         self.app_id = app_id
         self.app_hash = app_hash
+        if ip != "-" and port != "-" and login != "-" and password != "-":
+            self.proxy = (python_socks.ProxyType.SOCKS5,ip,port,True,login,password)
+        else:
+            self.proxy = None
         self.channels = []
-        self.thread = threading.Thread(target=self.startParsing, args=(self.session, self.app_id, self.app_hash),
+        self.thread = threading.Thread(target=self.setClient, args=(self.session, self.app_id, self.app_hash),
                                        name=f"user_{self.session}-Thread")
         self.thread.start()
-    def startParsing(self, session, app_id, app_hash):
-        self.setClient(session, app_id, app_hash)
-        self.client.start()
-        try:
-            self.client.run_until_disconnected()
-        except sqlite3.OperationalError:
-            return
-
     async def getChannels(self):
-        async with self.client:
-            while True:
-                for dialog in await self.client.get_dialogs():
-                    if dialog.is_channel and (not dialog.id in self.channels):
-                        self.channels.append(dialog.id)
-                        await self.checkPosts(dialog)
+        while True:
+            tmpDialogs = []
+            tmpDialogsIds = []
+            for dialog in await self.client.get_dialogs():
+                if dialog.is_channel:
+                    tmpDialogs.append(dialog)
+                    tmpDialogsIds.append(dialog.id)
+            for i in range(len(tmpDialogsIds)):
+                if not tmpDialogsIds[i] in self.channels:
+                    self.channels.append(tmpDialogsIds[i])
+                    await self.checkPosts(tmpDialogs[i])
+            for channel in self.channels:
+                if not channel in tmpDialogsIds:
+                    self.channels.remove(channel)
 
     async def checkPosts(self, channel):
         @self.client.on(events.NewMessage(chats=channel.id))
         async def handler(event):
-            message = await req(event.text)
-            try:
-                async with aiofiles.open("chanceToComment.txt",mode="r")as file:
-                    chance = await file.read()
-                if random.random() < float(int(chance) / 100):
-                    timeToWait = []
-                    async with aiofiles.open("timeToWait.txt",mode="r")as file:
-                        async for line in file:
-                            timeToWait.append(int(line))
-                    await asyncio.sleep(random.randint(timeToWait[0],timeToWait[1]))
-                    await self.client.send_message(entity=channel, message=message, comment_to=event)
-            except:
-                pass
+            if channel.id in self.channels:
+                try:
+                    chance = await readFile('chanceToComment.txt')
+                    if random.random() < float(int(chance) / 100):
+                        message = await req(event.text)
+                        minSymbols = await readFile('minSymbols.txt')
+                        if len(message) > int(minSymbols):
+                            async with aiosqlite.connect("accounts.db")as db:
+                                async with db.execute("SELECT hyperlink FROM users WHERE phoneNumber = ?;",(self.session,))as cur:
+                                    hyperlink = await cur.fetchone()
+                            if hyperlink != "-":
+                                textToInsert = f'<a href="{hyperlink[0]}">Смотреть тут</a>'
+                                message = "<span>" + message + "</span>" + f"\n{textToInsert}"
+                            timeToWait = await readFile('timeToWait.txt')
+                            timeToWait = timeToWait.split('\n')
+
+                            await asyncio.sleep(random.randint(int(timeToWait[0]),int(timeToWait[1])))
+                            await self.client.send_message(entity=channel, message=message, comment_to=event,parse_mode = "html")
+                            await self.client.session.save()
+                except:
+                    pass
+            else:
+                return
 
     def setClient(self,session, app_id, app_hash):
-        loop = asyncio.new_event_loop()
+        loop = asyncio.SelectorEventLoop()
         asyncio.set_event_loop(loop)
-        self.client = TelegramClient(session=f"sessions/{session}", api_id=int(app_id), api_hash=app_hash, loop=loop)
+        if self.proxy:
+            self.client = TelegramClient(session=f"sessions/{session}", api_id=int(app_id), api_hash=app_hash, loop=loop, proxy=self.proxy,app_version="4.0",system_version="IOS 14",device_model="iPhone 14")
+        else:
+            self.client = TelegramClient(session=f"sessions/{session}", api_id=int(app_id), api_hash=app_hash, loop=loop, app_version="4.0",system_version="IOS 14",device_model="iPhone 14")
+        self.client.start()
         self.client.loop.run_until_complete(self.getChannels())
+
     def stop(self):
         self.client.disconnect()
+        self.thread.join()

@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from middlewares import AdminMiddleware
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import ReplyKeyboardMarkup
@@ -9,10 +10,15 @@ from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from telethon import TelegramClient
 from classes import User, Paginator, UserChecking
-from config import BOT_TOKEN
+from config import BOT_TOKEN, readFile, writeFile
+from states import *
+import telethon
 import aiofiles
 import aiosqlite
 import os
+import python_socks
+import async_timeout
+import socks
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
@@ -26,46 +32,24 @@ keyboardMain = ReplyKeyboardMarkup(keyboard=[
     [r'Добавить "админа"',"Добавить аккаунт для комментирования"],
     ["Как я работаю?"],
     ["Изменить шанс комментирования","Изменить время ожидания","Изменить запрос к chatgpt"],
-    [r'Посмотреть "админов"',"Посмотреть добавленные аккаунты"]
+    ["Изменить минимальное кол-во символов в комментарии"],
+    [r'Посмотреть "админов"',"Посмотреть добавленные аккаунты"],
+    ['Изменить/удалить гиперссылку']
 ],resize_keyboard=True)
 
 client : TelegramClient = None
 user : User = None
+phoneNumber = None
 
-
-class AdminForm(StatesGroup):
-    phoneNumberAdmin = State()
-    adminId = State()
-class UserForm(StatesGroup):
-    phoneNumber = State()
-    app_id = State()
-    app_hash = State()
-
-class TimeToWaitForm(StatesGroup):
-    timeLowRange = State()
-    timeHighRange = State()
-
-class RequestForm(StatesGroup):
-    request = State()
-
-class ChanceForm(StatesGroup):
-    chance = State()
-
-class AccessCodeForm(StatesGroup):
-    code = State()
 
 @dp.message_handler(commands="start")
 async def start(message:types.Message):
-    timeToWait = []
-    async with aiofiles.open("timeToWait.txt",mode="r")as file:
-        async for line in file:
-            timeToWait.append(int(line))
-    prompt = ""
-    async with aiofiles.open("chatGPTRequest.txt",mode="r",encoding="utf-8")as file:
-        prompt = await file.read()
-    async with aiofiles.open("chanceToComment.txt",mode="r")as file:
-        chance = await file.read()
-    await message.answer(text=f"Выберите опцию. Ваше текущее время ожидания: от {timeToWait[0] / 60} мин. до {timeToWait[1] / 60} мин.\nВаш запрос к chatgpt выглядит так($$ - это текст поста):\n{prompt}\n\nВаш шанс оставить комментарий: {chance}%",reply_markup=keyboardMain)
+    timeToWait = await readFile("timeToWait.txt")
+    timeToWait = timeToWait.split("\n")
+    prompt = await readFile("chatGPTRequest.txt")
+    chance = await readFile("chanceToComment.txt")
+    minSymbols = await readFile("minSymbols.txt")
+    await message.answer(text=f"Выберите опцию.\nВаше текущее время ожидания: от {int(timeToWait[0]) / 60} мин. до {int(timeToWait[1]) / 60} мин.\nВаш запрос к chatgpt выглядит так($$ - это текст поста):\n{prompt}\n\nВаш шанс оставить комментарий: {chance}%\nМинимальное кол-во символов в комментарии: {minSymbols}",reply_markup=keyboardMain)
 
 @dp.message_handler(Text(equals='Отменить'), state='*')
 async def cancel_handler(message: types.Message, state: FSMContext):
@@ -86,8 +70,7 @@ async def process_chance(message: types.Message, state: FSMContext):
     try:
         if chance.isdigit():
             if 0 <= int(chance) <= 100:
-                async with aiofiles.open("chanceToComment.txt",mode="w")as file:
-                    await file.write(chance)
+                await writeFile('chanceToComment.txt',chance)
                 await message.answer(text="Готово!",reply_markup=keyboardMain)
             else:
                 await message.answer(text="Некорректные данные!",reply_markup=keyboardMain)
@@ -98,6 +81,51 @@ async def process_chance(message: types.Message, state: FSMContext):
     finally:
         await state.finish()
 
+@dp.message_handler(Text(equals="Изменить/удалить гиперссылку"))
+async def changeHyperlink(message: types.Message):
+    async with aiosqlite.connect("accounts.db")as db:
+        async with db.execute("SELECT phoneNumber,hyperlink FROM users;")as cur:
+            accounts = await cur.fetchall()
+    if len(accounts) > 0:
+        accountsButtons = InlineKeyboardMarkup()
+        for account in accounts:
+            if account[1] == "-":
+                accountsButtons.add(InlineKeyboardButton(text=str(account[0]), callback_data=f"view {account[0]}"),
+                                  InlineKeyboardButton(text="-", callback_data=f"view {account[1]}"),
+                                  InlineKeyboardButton(text="Добавить", callback_data=f"Добавить гиперссылку {account[0]}"))
+            else:
+                accountsButtons.add(InlineKeyboardButton(text=str(account[0]), callback_data=f"view {account[0]}"),
+                                  InlineKeyboardButton(text=str(account[1]),callback_data=f"view {account[1]}"),
+                                  InlineKeyboardButton(text="Изменить", callback_data=f"Добавить гиперссылку {account[0]}"))
+        paginator = Paginator(accountsButtons, size=5, dp=dp)
+        await message.answer(text="Ваши аккаунты и иъ гиперссылки",reply_markup=paginator())
+    else:
+        await message.answer(text="Аккаунтов нет..",reply_markup=keyboardMain)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('Добавить гиперссылку'))
+async def callback_process_changeHyperlink(callback_query: types.CallbackQuery):
+    global phoneNumber
+    phoneNumber = callback_query.data.split()[-1]
+    await HyperlinkForm.hyperlink.set()
+    await bot.send_message(chat_id=callback_query.from_user.id,text="Напишите ссылку. Если хотите удалить, то напишите прочерк(-)",reply_markup=keyboardCancel)
+
+@dp.message_handler(state=HyperlinkForm.hyperlink)
+async def process_hyperlink(message: types.Message, state: FSMContext):
+    global phoneNumber
+    hyperlink = message.text.strip()
+    if hyperlink != "-":
+        async with aiosqlite.connect("accounts.db")as db:
+            await db.execute("UPDATE users SET hyperlink = ? WHERE phoneNumber = ?;",(hyperlink,phoneNumber))
+            await db.commit()
+    else:
+        async with aiosqlite.connect("accounts.db")as db:
+            await db.execute('UPDATE users SET hyperlink = "-" WHERE phoneNumber = ?;',(phoneNumber,))
+            await db.commit()
+    phoneNumber = None
+    await state.finish()
+    await message.answer(text="Готово!",reply_markup=keyboardMain)
+
+
 @dp.message_handler(Text(equals="Изменить запрос к chatgpt"))
 async def changeRequest_start(message: types.Message):
     await RequestForm.request.set()
@@ -107,8 +135,7 @@ async def changeRequest_start(message: types.Message):
 async def process_request(message: types.Message, state: FSMContext):
     request = message.text.strip()
     if request.find("$$") != -1:
-        async with aiofiles.open("chatGPTRequest.txt",mode="w",encoding="utf-8")as file:
-            await file.write(request)
+        await writeFile("chatGPTRequest.txt",request)
         await message.answer(text='Готово!',reply_markup=keyboardMain)
     else:
         await message.answer(text='Ошибка! Символы "$$" не найдены',reply_markup=keyboardMain)
@@ -133,9 +160,7 @@ async def process_timeHighRange(message: types.Message, state: FSMContext):
             tmp1 = float(data["timeLowRange"])
             tmp2 = float(message.text.strip())
         if tmp1 <= tmp2:
-            async with aiofiles.open("timeToWait.txt","w")as file:
-                await file.write(f"{int(tmp1 * 60)}\n")
-                await file.write(f"{int(tmp2 * 60)}")
+            await writeFile('timeToWait.txt',f"{int(tmp1 * 60)}\n{int(tmp2 * 60)}")
             await message.reply(text=f"Готово!Ваше текущее ожидание: от {tmp1} мин. до {tmp2} мин.",reply_markup=keyboardMain)
         else:
             await message.reply(text="Ошибка! Ваша нижняя граница больше верхней. Повторите снова",reply_markup=keyboardMain)
@@ -166,7 +191,7 @@ async def getAdmins(message:types.Message):
         await message.answer(text="Админов нет...", reply_markup=keyboardMain)
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('Удалить админа'))
-async def proccess_callback_deleteAdmin(callback_query: types.CallbackQuery):
+async def process_callback_deleteAdmin(callback_query: types.CallbackQuery):
     adminToDelete = callback_query.data.split(" ")[-1]
     try:
         async with aiosqlite.connect("accounts.db") as db:
@@ -185,28 +210,29 @@ async def addAdmin(message:types.Message):
     await message.answer("Напишите никнейм для этого аккаунта",reply_markup=keyboardCancel)
 
 @dp.message_handler(state=AdminForm.phoneNumberAdmin)
-async def proccess_phoneNumberAdmin(message: types.Message, state: FSMContext):
+async def process_phoneNumberAdmin(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['phoneNumberAdmin'] = message.text.strip()
     await AdminForm.next()
     await message.reply("Напишите id аккаунта",reply_markup=keyboardCancel)
 
 @dp.message_handler(state=AdminForm.adminId)
-async def proccess_adminId(message:types.Message,state:FSMContext):
+async def process_adminId(message:types.Message,state:FSMContext):
     async with state.proxy() as data:
         data['adminId'] = message.text.strip()
 
     async with aiosqlite.connect("accounts.db")as db:
         try:
-            await db.execute("INSERT INTO admins(phoneNumber,adminId) VALUES(?,?);",(data["phoneNumberAdmin"],data["adminId"]))
-            await db.commit()
-            await state.finish()
-            await message.reply("Готово!", reply_markup=keyboardMain)
+            if data["adminId"].isdigit():
+                await db.execute("INSERT INTO admins(phoneNumber,adminId) VALUES(?,?);",(data["phoneNumberAdmin"],data["adminId"]))
+                await db.commit()
+                await state.finish()
+                await message.reply("Готово!", reply_markup=keyboardMain)
+            else:
+                await message.reply("Некорректные данные!", reply_markup=keyboardMain)
         except aiosqlite.IntegrityError:
             await state.finish()
             await message.reply("Админ с такими данными уже сущетсвует!",reply_markup=keyboardMain)
-
-
 
 @dp.message_handler(Text(equals="Посмотреть добавленные аккаунты"))
 async def getAccounts(message:types.Message):
@@ -227,7 +253,7 @@ async def getAccounts(message:types.Message):
         await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('Удалить аккаунт'))
-async def proccess_callback_deleteUser(callback_query: types.CallbackQuery):
+async def process_callback_deleteUser(callback_query: types.CallbackQuery):
     userToDelete = callback_query.data.split(" ")[-1]
     try:
         from main import usersToCheck
@@ -244,6 +270,22 @@ async def proccess_callback_deleteUser(callback_query: types.CallbackQuery):
         await bot.send_message(callback_query.from_user.id,text=f"Готово! Пользователь {userToDelete} удалён!",reply_markup=keyboardMain)
     except:
          await bot.send_message(callback_query.from_user.id,text="Непридвиденная ошибка!", reply_markup=keyboardMain)
+
+@dp.message_handler(Text(equals="Изменить минимальное кол-во символов в комментарии"))
+async def changeMinSymbols(message: types.Message):
+    await MinSymbolsForm.minSymbols.set()
+    await message.answer(text="Напишите минимальное кол-во символов в комментарии",reply_markup=keyboardCancel)
+
+@dp.message_handler(state=MinSymbolsForm.minSymbols)
+async def process_minSymbols(message: types.Message, state: FSMContext):
+    minSymbols = message.text.strip()
+    if minSymbols.isdigit():
+        if int(minSymbols) >= 0:
+            await writeFile("minSymbols.txt",minSymbols)
+            await message.answer(text="Готово!",reply_markup=keyboardMain)
+    else:
+        await message.answer(text='Некорректные данные!',reply_markup=keyboardMain)
+    await state.finish()
 
 @dp.message_handler(Text(equals="Добавить аккаунт для комментирования"))
 async def addAccount(message:types.Message):
@@ -283,43 +325,93 @@ async def process_app_id(message: types.Message, state: FSMContext):
 async def process_app_hash(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['app_hash'] = message.text.strip()
-        global client, user
-        user = User(data["phoneNumber"], data["app_id"], data["app_hash"])
+    await UserForm.next()
+    await message.reply("Напишите ip от прокси(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
+        
+
+@dp.message_handler(state=UserForm.ip)
+async def process_ip(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['ip'] = message.text.strip()
+    await UserForm.next()
+    await message.reply("Напишите порт от прокси(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
+
+@dp.message_handler(state=UserForm.port)
+async def process_port(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['port'] = message.text.strip()
+    await UserForm.next()
+    await message.reply("Напишите логин от прокси(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
+
+@dp.message_handler(state=UserForm.proxyLogin)
+async def process_login(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['login'] = message.text.strip()
+    await UserForm.next()
+    await message.reply("Напишите пароль от прокси(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
+
+@dp.message_handler(state=UserForm.proxyPassword)
+async def process_password(message: types.Message, state: FSMContext):
+    global client, user
+    async with state.proxy() as data:
+        user = User(data["phoneNumber"], data["app_id"], data["app_hash"],data['ip'],data['port'],data['login'],message.text.strip())
+        proxy = (python_socks.ProxyType.SOCKS5,data['ip'],data['port'],True,data['login'],message.text.strip())
     try:
-        client = TelegramClient(session=f'sessions/{user.phoneNumber}', api_id=int(user.app_id),
-                                api_hash=str(user.app_hash))
+        if data['ip'] != "-" and data['port'] != "-" and data['login'] != "-" and message.text.strip() != "-":
+            client = TelegramClient(session=f'sessions/{user.phoneNumber}', api_id=int(user.app_id),
+                                    api_hash=str(user.app_hash),proxy=proxy,app_version="4.0",system_version="IOS 14",device_model="iPhone 14")
+        else:
+            client = TelegramClient(session=f'sessions/{user.phoneNumber}', api_id=int(user.app_id),
+                                    api_hash=str(user.app_hash),app_version="4.0",system_version="IOS 14",device_model="iPhone 14")
         await client.connect()
         if not await client.is_user_authorized():
             await client.send_code_request(phone=data["phoneNumber"])
-            await message.answer("Введите код, который пришел вам в телеграм", reply_markup=keyboardCancel)
-            await state.finish()
-            await AccessCodeForm.code.set()
+            await message.answer("Введите код, который пришел вам в телеграм. ВНИМАНИЕ! Поставьте в любом месте нижнее подчеркивание(_), иначе придется проходить все этапы регистрации опять!", reply_markup=keyboardCancel)
+            await UserForm.next()
         else:
             await saveUser(message,state)
     except:
         await removeSessionFile(user.phoneNumber)
         await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
         await state.finish()
-@dp.message_handler(state=AccessCodeForm.code)
+
+@dp.message_handler(state=UserForm.code)
 async def process_code(message: types.Message, state: FSMContext):
     global user
     try:
-        await client.sign_in(user.phoneNumber,message.text.strip())
+        await client.sign_in(user.phoneNumber,message.text.strip().replace("_",""))
         await saveUser(message, state)
+    except telethon.errors.SessionPasswordNeededError:
+        async with state.proxy() as data:
+            data["code"] = message.text.strip()
+        await UserForm.next()
+        await message.answer(text="Введите пароль от 2FA",reply_markup=keyboardCancel)
     except:
         await removeSessionFile(user.phoneNumber)
         await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
         await state.finish()
 
+@dp.message_handler(state=UserForm.password)
+async def process_password(message: types.Message, state: FSMContext):
+    password = message.text.strip()
+    try:
+        async with state.proxy() as data:
+            await client.sign_in(password=password)
+            await saveUser(message,state)
+    except:
+        await removeSessionFile(user.phoneNumber)
+        await state.finish()
+        await message.answer("Непридвиденная ошибка!",reply_markup=keyboardMain)
+
 async def saveUser(message: types.Message,state: FSMContext):
     try:
         async with aiosqlite.connect("accounts.db") as db:
-            await db.execute("INSERT INTO users (phoneNumber,app_id,app_hash) VALUES(?,?,?);",
-                             (user.phoneNumber, user.app_id, user.app_hash))
+            await db.execute("INSERT INTO users (phoneNumber, app_id, app_hash, IP, PORT, login, password) VALUES(?,?,?,?,?,?,?);",
+                             (user.phoneNumber, user.app_id, user.app_hash,user.ip,user.port,user.login,user.password))
             await db.commit()
         await client.disconnect()
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, startCheckingNewUser, user.phoneNumber, user.app_id, user.app_hash)
+        from main import usersToCheck
+        usersToCheck.append(UserChecking(user.phoneNumber, user.app_id, user.app_hash,user.ip,user.port,user.login,user.password))
         await message.answer("Готово!", reply_markup=keyboardMain)
         await state.finish()
     except aiosqlite.IntegrityError:
@@ -327,17 +419,14 @@ async def saveUser(message: types.Message,state: FSMContext):
         await message.answer("Ошибка!Аккаунт с такими данными уже существует!", reply_markup=keyboardMain)
         await state.finish()
 
-def startCheckingNewUser(phoneNumber,app_id,app_hash):
-    from main import usersToCheck
-    usersToCheck.append(UserChecking(phoneNumber,app_id, app_hash))
-
 async def removeSessionFile(sessionName):
     try:
         os.remove(f"sessions/{sessionName}.session")
     except:
         pass
+
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     dp.middleware.setup(AdminMiddleware())
-    executor.start_polling(dp)
+    executor.start_polling(dp, skip_updates=True,loop=loop)
