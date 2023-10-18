@@ -31,3 +31,6 @@ class MinSymbolsForm(StatesGroup):
 
 class HyperlinkForm(StatesGroup):
     hyperlink = State()
+
+class OpenAIKeyForm(StatesGroup):
+    api_key = State()

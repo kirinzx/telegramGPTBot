@@ -2,22 +2,20 @@ import aiosqlite
 import threading
 from aiogram import Dispatcher, types
 from aiogram.types import CallbackQuery
-from aiogram.types.inline_keyboard import InlineKeyboardMarkup, InlineKeyboardButton
 from itertools import islice
-from typing import Iterable, Any, Iterator, Callable, Coroutine, Tuple
+from typing import Iterable, Any, Iterator, Callable, Coroutine
 from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher.filters.state import State
 from aiogram.dispatcher import FSMContext
-from telethon import TelegramClient, events
-from telethon.types import Channel
+from telethon import TelegramClient, events, errors
 import asyncio
 import random
-import aiofiles
 from chatGPTReq import req
-from config import readFile, writeFile
+from config import getSetting
 import python_socks
 import async_timeout
 import socks
+import logging
 
 class User:
     def __init__(self,phoneNumber,app_id,app_hash,ip,port,login,password):
@@ -230,42 +228,60 @@ class UserChecking:
         while True:
             tmpDialogs = []
             tmpDialogsIds = []
-            for dialog in await self.client.get_dialogs():
-                if dialog.is_channel:
-                    tmpDialogs.append(dialog)
-                    tmpDialogsIds.append(dialog.id)
-            for i in range(len(tmpDialogsIds)):
-                if not tmpDialogsIds[i] in self.channels:
-                    self.channels.append(tmpDialogsIds[i])
-                    await self.checkPosts(tmpDialogs[i])
-            for channel in self.channels:
-                if not channel in tmpDialogsIds:
-                    self.channels.remove(channel)
+            try:
+                for dialog in await self.client.get_dialogs():
+                    if dialog.is_channel:
+                        tmpDialogs.append(dialog)
+                        tmpDialogsIds.append(dialog.id)
+                for i in range(len(tmpDialogsIds)):
+                    if not tmpDialogsIds[i] in self.channels:
+                        self.channels.append(tmpDialogsIds[i])
+                        await self.checkPosts(tmpDialogs[i])
+                for channel in self.channels:
+                    if not channel in tmpDialogsIds:
+                        self.channels.remove(channel)
+            except Exception as e:
+                logging.info(f'Error!{e}')
+            await asyncio.sleep(10)
 
     async def checkPosts(self, channel):
         @self.client.on(events.NewMessage(chats=channel.id))
-        async def handler(event):
+        async def handler(event: events.NewMessage.Event):
             if channel.id in self.channels:
                 try:
-                    chance = await readFile('chanceToComment.txt')
-                    if random.random() < float(int(chance) / 100):
+                    chance = getSetting('chanceToComment')
+                    if random.random() <= float(int(chance) / 100):
                         message = await req(event.text)
-                        minSymbols = await readFile('minSymbols.txt')
-                        if len(message) > int(minSymbols):
+                        minSymbols = getSetting('minSymbols')
+                        if len(message) >= int(minSymbols):
+
                             async with aiosqlite.connect("accounts.db")as db:
                                 async with db.execute("SELECT hyperlink FROM users WHERE phoneNumber = ?;",(self.session,))as cur:
                                     hyperlink = await cur.fetchone()
-                            if hyperlink != "-":
+                            if hyperlink[0] != "-":
                                 textToInsert = f'<a href="{hyperlink[0]}">Смотреть тут</a>'
                                 message = "<span>" + message + "</span>" + f"\n{textToInsert}"
-                            timeToWait = await readFile('timeToWait.txt')
-                            timeToWait = timeToWait.split('\n')
-
-                            await asyncio.sleep(random.randint(int(timeToWait[0]),int(timeToWait[1])))
+                            downtimeToWait = getSetting('downtimeToWait')
+                            upTimeToWait = getSetting('uptimeToWait')
+                            logging.info('sending a message')
+                            await asyncio.sleep(random.randint(int(downtimeToWait),int(upTimeToWait)))
                             await self.client.send_message(entity=channel, message=message, comment_to=event,parse_mode = "html")
-                            await self.client.session.save()
-                except:
-                    pass
+                            try:
+                                channelEntity = await self.client.get_entity(event.chat_id)
+                                if channelEntity.username:
+                                    channelName = channelEntity.username
+                                else:
+                                    channelName = channelEntity.usernames[0]
+                                post = f't.me/{channelName}/{event.message.id}'
+                                channelName = '@' + channelName
+                                comment = message
+                                async with aiosqlite.connect('accounts.db')as db:
+                                    await db.execute("INSERT INTO comments(nickname, channel, comment, post) VALUES(?,?,?,?);",(self.session, channelName, comment, post))
+                                    await db.commit()
+                            except Exception as e:
+                                logging.info(f'Error!{e}')
+                except Exception as e:
+                    logging.info(f'Error!{e}')
             else:
                 return
 

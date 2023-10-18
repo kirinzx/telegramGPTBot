@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  tgbot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    container_name: tgbot_container
+    command: >
+      sh -c "python3 main.py"
+    volumes:
+      - ./bot:/app

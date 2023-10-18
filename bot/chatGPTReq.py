@@ -1,14 +1,13 @@
-from config import OPENAI_API_KEY
 import openai
-import aiofiles
-from config import readFile
+from config import getSetting
 
 async def req(post):
     try:
-        openai.api_key = OPENAI_API_KEY
-        prompt = await readFile('chatGPTRequest.txt')
+        openai.api_key = getSetting('openai_api_key')
+        prompt = getSetting('chatGPTRequest')
         request = prompt.replace("$$",str(post).strip(),1)
         response = await openai.ChatCompletion.acreate(model="gpt-3.5-turbo",messages=[{"role":"user","content":request}])
         return response.choices[0].message.content.strip()
-    except:
+    except Exception as e:
+        print(e)
         return None

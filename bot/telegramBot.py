@@ -1,24 +1,27 @@
 import asyncio
 import threading
+
+import aiohttp
 from middlewares import AdminMiddleware
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import ReplyKeyboardMarkup
 from aiogram.types.inline_keyboard import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.dispatcher.filters import Text
-from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from telethon import TelegramClient
 from classes import User, Paginator, UserChecking
-from config import BOT_TOKEN, readFile, writeFile
+from config import BOT_TOKEN, getSetting, setSetting
 from states import *
 import telethon
-import aiofiles
 import aiosqlite
 import os
 import python_socks
 import async_timeout
 import socks
+import configparser
+import openpyxl
+import io
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
@@ -30,12 +33,16 @@ keyboardCancel = ReplyKeyboardMarkup(keyboard=[
 
 keyboardMain = ReplyKeyboardMarkup(keyboard=[
     [r'Добавить "админа"',"Добавить аккаунт для комментирования"],
-    ["Как я работаю?"],
-    ["Изменить шанс комментирования","Изменить время ожидания","Изменить запрос к chatgpt"],
-    ["Изменить минимальное кол-во символов в комментарии"],
+    ["Как я работаю?",'Изменить настройки','Получить отчет'],
     [r'Посмотреть "админов"',"Посмотреть добавленные аккаунты"],
-    ['Изменить/удалить гиперссылку']
 ],resize_keyboard=True)
+
+keyboardSettings = ReplyKeyboardMarkup(keyboard=[
+    ["Изменить шанс комментирования","Изменить время ожидания","Изменить запрос к chatgpt"],
+    ["Изменить минимальное кол-во символов в комментарии",'Изменить/удалить гиперссылку'],
+    ['Изменить API ключ'],
+    ['Назад']
+], resize_keyboard=True)
 
 client : TelegramClient = None
 user : User = None
@@ -44,12 +51,12 @@ phoneNumber = None
 
 @dp.message_handler(commands="start")
 async def start(message:types.Message):
-    timeToWait = await readFile("timeToWait.txt")
-    timeToWait = timeToWait.split("\n")
-    prompt = await readFile("chatGPTRequest.txt")
-    chance = await readFile("chanceToComment.txt")
-    minSymbols = await readFile("minSymbols.txt")
-    await message.answer(text=f"Выберите опцию.\nВаше текущее время ожидания: от {int(timeToWait[0]) / 60} мин. до {int(timeToWait[1]) / 60} мин.\nВаш запрос к chatgpt выглядит так($$ - это текст поста):\n{prompt}\n\nВаш шанс оставить комментарий: {chance}%\nМинимальное кол-во символов в комментарии: {minSymbols}",reply_markup=keyboardMain)
+    downtimeToWait = getSetting('downTimeToWait')
+    upTimeToWait = getSetting('upTimeToWait')
+    prompt = getSetting("chatGPTRequest")
+    chance = getSetting("chanceToComment")
+    minSymbols = getSetting("minSymbols")
+    await message.answer(text=f"Выберите опцию.\nВаше текущее время ожидания: от {round(int(downtimeToWait) / 60,1)} мин. до {round(int(upTimeToWait) / 60,2)} мин.\nВаш запрос к chatgpt выглядит так($$ - это текст поста):\n{prompt}\n\nВаш шанс оставить комментарий: {chance}%\nМинимальное кол-во символов в комментарии: {minSymbols}",reply_markup=keyboardMain)
 
 @dp.message_handler(Text(equals='Отменить'), state='*')
 async def cancel_handler(message: types.Message, state: FSMContext):
@@ -58,6 +65,14 @@ async def cancel_handler(message: types.Message, state: FSMContext):
         return
     await state.finish()
     await message.reply('Отменено', reply_markup=keyboardMain)
+
+@dp.message_handler(Text(equals='Изменить настройки'))
+async def getSettings(message: types.Message):
+    await message.answer(text='Выберите необходимую опцию', reply_markup=keyboardSettings)
+
+@dp.message_handler(Text(equals='Назад'))
+async def getBack(message: types.Message):
+    await message.answer(text='Выберите необходимую опцию', reply_markup=keyboardMain)
 
 @dp.message_handler(Text(equals="Изменить шанс комментирования"))
 async def changeChance_start(message: types.Message):
@@ -70,7 +85,7 @@ async def process_chance(message: types.Message, state: FSMContext):
     try:
         if chance.isdigit():
             if 0 <= int(chance) <= 100:
-                await writeFile('chanceToComment.txt',chance)
+                setSetting('chanceToComment',chance)
                 await message.answer(text="Готово!",reply_markup=keyboardMain)
             else:
                 await message.answer(text="Некорректные данные!",reply_markup=keyboardMain)
@@ -126,6 +141,27 @@ async def process_hyperlink(message: types.Message, state: FSMContext):
     await message.answer(text="Готово!",reply_markup=keyboardMain)
 
 
+@dp.message_handler(Text(equals='Получить отчет'))
+async def sendReport(message: types.Message):
+    async with aiosqlite.connect('accounts.db')as db:
+        async with db.execute('SELECT nickname, channel, comment, post from comments')as cur:
+            comments = await cur.fetchall()
+            comments.insert(0, ('Номер телефона', 'Канал', 'Комментарий', 'Пост'))
+    thread = threading.Thread(target=sendExcel,args=(comments,asyncio.get_event_loop(),message.from_id))
+    thread.start()
+
+def sendExcel(data,botLoop, chat_id):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    excel = openpyxl.Workbook()
+    sheet = excel.active
+    for item in data:
+        sheet.append(item)
+    excelBytes = io.BytesIO()
+    excel.save(excelBytes)
+    excelBytes.seek(0)
+    botLoop.create_task(bot.send_document(chat_id, types.InputFile(excelBytes, filename='отчет.xlsx')))
+
 @dp.message_handler(Text(equals="Изменить запрос к chatgpt"))
 async def changeRequest_start(message: types.Message):
     await RequestForm.request.set()
@@ -135,7 +171,7 @@ async def changeRequest_start(message: types.Message):
 async def process_request(message: types.Message, state: FSMContext):
     request = message.text.strip()
     if request.find("$$") != -1:
-        await writeFile("chatGPTRequest.txt",request)
+        setSetting("chatGPTRequest",request)
         await message.answer(text='Готово!',reply_markup=keyboardMain)
     else:
         await message.answer(text='Ошибка! Символы "$$" не найдены',reply_markup=keyboardMain)
@@ -160,7 +196,8 @@ async def process_timeHighRange(message: types.Message, state: FSMContext):
             tmp1 = float(data["timeLowRange"])
             tmp2 = float(message.text.strip())
         if tmp1 <= tmp2:
-            await writeFile('timeToWait.txt',f"{int(tmp1 * 60)}\n{int(tmp2 * 60)}")
+            setSetting('downTimeToWait',f"{int(tmp1 * 60)}")
+            setSetting('upTimeToWait', f"{int(tmp2 * 60)}")
             await message.reply(text=f"Готово!Ваше текущее ожидание: от {tmp1} мин. до {tmp2} мин.",reply_markup=keyboardMain)
         else:
             await message.reply(text="Ошибка! Ваша нижняя граница больше верхней. Повторите снова",reply_markup=keyboardMain)
@@ -234,6 +271,18 @@ async def process_adminId(message:types.Message,state:FSMContext):
             await state.finish()
             await message.reply("Админ с такими данными уже сущетсвует!",reply_markup=keyboardMain)
 
+@dp.message_handler(Text(equals='Изменить API ключ'))
+async def changeApiKey(message: types.Message):
+    await OpenAIKeyForm.api_key.set()
+    await message.answer(text='Напишите новый апи ключ',reply_markup=keyboardCancel)
+
+@dp.message_handler(state=OpenAIKeyForm.api_key)
+async def process_api_key(message: types.Message, state: FSMContext):
+    await state.finish()
+    key = message.text.strip()
+    setSetting('openai_api_key',key)
+    await message.answer(text='Готово!',reply_markup=keyboardMain)
+
 @dp.message_handler(Text(equals="Посмотреть добавленные аккаунты"))
 async def getAccounts(message:types.Message):
     try:
@@ -281,7 +330,7 @@ async def process_minSymbols(message: types.Message, state: FSMContext):
     minSymbols = message.text.strip()
     if minSymbols.isdigit():
         if int(minSymbols) >= 0:
-            await writeFile("minSymbols.txt",minSymbols)
+            setSetting("minSymbols",minSymbols)
             await message.answer(text="Готово!",reply_markup=keyboardMain)
     else:
         await message.answer(text='Некорректные данные!',reply_markup=keyboardMain)
@@ -300,6 +349,7 @@ async def getHelp(message:types.Message):
     1. Номер телефона\n
     2. API_ID и API_HASH. Как их получить? Заходим на сайт https://my.telegram.org/. Это официаьный сайт телеграма. В нём мы создаем новое приложение, после получаем API_ID и API_HASH.\n
     3. Доступ к телеграм аккаунту. Вам на аккаунт придет код, необходимый для работы.\n
+    3.1. По желанию можно добавить прокси. Поддерживается ТОЛЬКО SOCKS5 прокси.
     Вы можете изменить время ожидания перед комментированием, для этого просто нажмите на соответствующую кнопку и введите сначала нижнюю границу (минимальное кол-во минут), потом верхнюю(максимальное кол-во минут)\n
     Кто такие Админы? Это те люди, которые могут пользоваться ботом\n
     Вот и все! Теперь я начинаю комментировать....
@@ -326,7 +376,7 @@ async def process_app_hash(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['app_hash'] = message.text.strip()
     await UserForm.next()
-    await message.reply("Напишите ip от прокси(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
+    await message.reply("Напишите ip от прокси SOCKS5(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
         
 
 @dp.message_handler(state=UserForm.ip)
@@ -334,21 +384,21 @@ async def process_ip(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['ip'] = message.text.strip()
     await UserForm.next()
-    await message.reply("Напишите порт от прокси(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
+    await message.reply("Напишите порт от прокси SOCKS5(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
 
 @dp.message_handler(state=UserForm.port)
 async def process_port(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['port'] = message.text.strip()
     await UserForm.next()
-    await message.reply("Напишите логин от прокси(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
+    await message.reply("Напишите логин от прокси SOCKS5(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
 
 @dp.message_handler(state=UserForm.proxyLogin)
 async def process_login(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['login'] = message.text.strip()
     await UserForm.next()
-    await message.reply("Напишите пароль от прокси(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
+    await message.reply("Напишите пароль от прокси SOCKS5(если не хотите его использовать, то напишите прочерк(-))",reply_markup=keyboardCancel)
 
 @dp.message_handler(state=UserForm.proxyPassword)
 async def process_password(message: types.Message, state: FSMContext):
@@ -370,7 +420,8 @@ async def process_password(message: types.Message, state: FSMContext):
             await UserForm.next()
         else:
             await saveUser(message,state)
-    except:
+    except Exception as e:
+        print(f'Error!{e}')
         await removeSessionFile(user.phoneNumber)
         await message.answer("Непридвиденная ошибка!", reply_markup=keyboardMain)
         await state.finish()
@@ -429,4 +480,8 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     dp.middleware.setup(AdminMiddleware())
-    executor.start_polling(dp, skip_updates=True,loop=loop)
+    while True:
+        try:
+            executor.start_polling(dp, skip_updates=True,loop=loop)
+        except aiohttp.client_exceptions.ServerDisconnectedError:
+            print(f'Server was crashed.Trying to restart..')
