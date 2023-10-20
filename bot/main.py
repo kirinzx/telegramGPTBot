@@ -1,7 +1,7 @@
 from telegramBot import main as tgMain
 import threading
 import sqlite3
-from classes import UserChecking
+from classes import UserChecking, chatGPTTG
 from typing import List
 import logging
 
@@ -11,6 +11,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     tgBot = threading.Thread(target=tgMain,name="tgBot-Thread")
     tgBot.start()
+    chatGPTTG.start()
     con = sqlite3.connect("accounts.db")
     cur = con.cursor()
     cur.execute(

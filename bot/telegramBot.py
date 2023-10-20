@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 
 import aiohttp
@@ -10,8 +11,9 @@ from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from telethon import TelegramClient
-from classes import User, Paginator, UserChecking
-from config import BOT_TOKEN, getSetting, setSetting
+from classes import User, Paginator, UserChecking, chatGPTTG
+from chatGPTReq import ChatGPTTG
+from config import BOT_TOKEN, getSetting, setSetting, setReqUser
 from states import *
 import telethon
 import aiosqlite
@@ -26,6 +28,7 @@ import io
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot,storage=storage)
+isReq = False
 
 keyboardCancel = ReplyKeyboardMarkup(keyboard=[
     ["Отменить"],
@@ -40,7 +43,7 @@ keyboardMain = ReplyKeyboardMarkup(keyboard=[
 keyboardSettings = ReplyKeyboardMarkup(keyboard=[
     ["Изменить шанс комментирования","Изменить время ожидания","Изменить запрос к chatgpt"],
     ["Изменить минимальное кол-во символов в комментарии",'Изменить/удалить гиперссылку'],
-    ['Изменить API ключ'],
+    ['Добавить тг акккаунт для запросов'],
     ['Назад']
 ], resize_keyboard=True)
 
@@ -271,18 +274,6 @@ async def process_adminId(message:types.Message,state:FSMContext):
             await state.finish()
             await message.reply("Админ с такими данными уже сущетсвует!",reply_markup=keyboardMain)
 
-@dp.message_handler(Text(equals='Изменить API ключ'))
-async def changeApiKey(message: types.Message):
-    await OpenAIKeyForm.api_key.set()
-    await message.answer(text='Напишите новый апи ключ',reply_markup=keyboardCancel)
-
-@dp.message_handler(state=OpenAIKeyForm.api_key)
-async def process_api_key(message: types.Message, state: FSMContext):
-    await state.finish()
-    key = message.text.strip()
-    setSetting('openai_api_key',key)
-    await message.answer(text='Готово!',reply_markup=keyboardMain)
-
 @dp.message_handler(Text(equals="Посмотреть добавленные аккаунты"))
 async def getAccounts(message:types.Message):
     try:
@@ -336,8 +327,11 @@ async def process_minSymbols(message: types.Message, state: FSMContext):
         await message.answer(text='Некорректные данные!',reply_markup=keyboardMain)
     await state.finish()
 
-@dp.message_handler(Text(equals="Добавить аккаунт для комментирования"))
+@dp.message_handler(Text(equals=("Добавить аккаунт для комментирования",'Добавить тг акккаунт для запросов')))
 async def addAccount(message:types.Message):
+    if message.text == 'Добавить тг акккаунт для запросов':
+        global isReq
+        isReq = True
     await UserForm.phoneNumber.set()
     await message.answer(text="Напишите номер телефона(с кодом страны)",reply_markup=keyboardCancel)
 
@@ -358,7 +352,7 @@ async def getHelp(message:types.Message):
 @dp.message_handler(state=UserForm.phoneNumber)
 async def process_nickname(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
-        data['phoneNumber'] = message.text.strip()
+        data['phoneNumber'] = message.text.strip().replace(' ','')
 
     await UserForm.next()
     await message.reply("Напишите api_id",reply_markup=keyboardCancel)
@@ -403,15 +397,19 @@ async def process_login(message: types.Message, state: FSMContext):
 @dp.message_handler(state=UserForm.proxyPassword)
 async def process_password(message: types.Message, state: FSMContext):
     global client, user
-    async with state.proxy() as data:
-        user = User(data["phoneNumber"], data["app_id"], data["app_hash"],data['ip'],data['port'],data['login'],message.text.strip())
-        proxy = (python_socks.ProxyType.SOCKS5,data['ip'],data['port'],True,data['login'],message.text.strip())
     try:
+        async with state.proxy() as data:
+            user = User(data["phoneNumber"], data["app_id"], data["app_hash"],data['ip'],data['port'],data['login'],message.text.strip())
+            proxy = (python_socks.ProxyType.SOCKS5,data['ip'],data['port'],True,data['login'],message.text.strip())
+        if isReq:
+            session = f'mainSession/{user.phoneNumber}'
+        else:
+            session = f'sessions/{user.phoneNumber}'
         if data['ip'] != "-" and data['port'] != "-" and data['login'] != "-" and message.text.strip() != "-":
-            client = TelegramClient(session=f'sessions/{user.phoneNumber}', api_id=int(user.app_id),
+            client = TelegramClient(session=session, api_id=int(user.app_id),
                                     api_hash=str(user.app_hash),proxy=proxy,app_version="4.0",system_version="IOS 14",device_model="iPhone 14")
         else:
-            client = TelegramClient(session=f'sessions/{user.phoneNumber}', api_id=int(user.app_id),
+            client = TelegramClient(session=session, api_id=int(user.app_id),
                                     api_hash=str(user.app_hash),app_version="4.0",system_version="IOS 14",device_model="iPhone 14")
         await client.connect()
         if not await client.is_user_authorized():
@@ -449,22 +447,31 @@ async def process_password(message: types.Message, state: FSMContext):
         async with state.proxy() as data:
             await client.sign_in(password=password)
             await saveUser(message,state)
-    except:
+    except Exception as e:
         await removeSessionFile(user.phoneNumber)
         await state.finish()
+        logging.info(f'error in 2steppass. {e}')
         await message.answer("Непридвиденная ошибка!",reply_markup=keyboardMain)
 
 async def saveUser(message: types.Message,state: FSMContext):
     try:
-        async with aiosqlite.connect("accounts.db") as db:
-            await db.execute("INSERT INTO users (phoneNumber, app_id, app_hash, IP, PORT, login, password) VALUES(?,?,?,?,?,?,?);",
-                             (user.phoneNumber, user.app_id, user.app_hash,user.ip,user.port,user.login,user.password))
-            await db.commit()
+        global isReq, chatGPTTG
+        if isReq:
+            setReqUser(user)
+            await chatGPTTG.stop()
+            chatGPTTG.start()
+            chatGPTTG = ChatGPTTG()
+        else:
+            async with aiosqlite.connect("accounts.db") as db:
+                await db.execute("INSERT INTO users (phoneNumber, app_id, app_hash, IP, PORT, login, password) VALUES(?,?,?,?,?,?,?);",
+                                (user.phoneNumber, user.app_id, user.app_hash,user.ip,user.port,user.login,user.password))
+                await db.commit()
+            from main import usersToCheck
+            usersToCheck.append(UserChecking(user.phoneNumber, user.app_id, user.app_hash,user.ip,user.port,user.login,user.password))
         await client.disconnect()
-        from main import usersToCheck
-        usersToCheck.append(UserChecking(user.phoneNumber, user.app_id, user.app_hash,user.ip,user.port,user.login,user.password))
         await message.answer("Готово!", reply_markup=keyboardMain)
         await state.finish()
+        isReq = False
     except aiosqlite.IntegrityError:
         await removeSessionFile(user.phoneNumber)
         await message.answer("Ошибка!Аккаунт с такими данными уже существует!", reply_markup=keyboardMain)

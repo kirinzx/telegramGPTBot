@@ -14,7 +14,6 @@ class UserForm(StatesGroup):
     proxyPassword = State()
     code = State()
     password = State()
-    
 
 class TimeToWaitForm(StatesGroup):
     timeLowRange = State()

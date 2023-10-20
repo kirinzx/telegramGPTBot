@@ -10,7 +10,7 @@ from aiogram.dispatcher import FSMContext
 from telethon import TelegramClient, events, errors
 import asyncio
 import random
-from chatGPTReq import req
+from chatGPTReq import ChatGPTTG
 from config import getSetting
 import python_socks
 import async_timeout
@@ -230,7 +230,7 @@ class UserChecking:
             tmpDialogsIds = []
             try:
                 for dialog in await self.client.get_dialogs():
-                    if dialog.is_channel:
+                    if dialog.is_channel and dialog.id != 6170250871:
                         tmpDialogs.append(dialog)
                         tmpDialogsIds.append(dialog.id)
                 for i in range(len(tmpDialogsIds)):
@@ -242,7 +242,7 @@ class UserChecking:
                         self.channels.remove(channel)
             except Exception as e:
                 logging.info(f'Error!{e}')
-            await asyncio.sleep(10)
+            await asyncio.sleep(20)
 
     async def checkPosts(self, channel):
         @self.client.on(events.NewMessage(chats=channel.id))
@@ -251,35 +251,36 @@ class UserChecking:
                 try:
                     chance = getSetting('chanceToComment')
                     if random.random() <= float(int(chance) / 100):
-                        message = await req(event.text)
-                        minSymbols = getSetting('minSymbols')
-                        if len(message) >= int(minSymbols):
+                        message = await chatGPTTG.req(event.text)
+                        if not ('Токены на балансе закончились' in message or 'Tokens on the balance are over' in message):
+                            minSymbols = getSetting('minSymbols')
+                            if len(message) >= int(minSymbols):
 
-                            async with aiosqlite.connect("accounts.db")as db:
-                                async with db.execute("SELECT hyperlink FROM users WHERE phoneNumber = ?;",(self.session,))as cur:
-                                    hyperlink = await cur.fetchone()
-                            if hyperlink[0] != "-":
-                                textToInsert = f'<a href="{hyperlink[0]}">Смотреть тут</a>'
-                                message = "<span>" + message + "</span>" + f"\n{textToInsert}"
-                            downtimeToWait = getSetting('downtimeToWait')
-                            upTimeToWait = getSetting('uptimeToWait')
-                            logging.info('sending a message')
-                            await asyncio.sleep(random.randint(int(downtimeToWait),int(upTimeToWait)))
-                            await self.client.send_message(entity=channel, message=message, comment_to=event,parse_mode = "html")
-                            try:
-                                channelEntity = await self.client.get_entity(event.chat_id)
-                                if channelEntity.username:
-                                    channelName = channelEntity.username
-                                else:
-                                    channelName = channelEntity.usernames[0]
-                                post = f't.me/{channelName}/{event.message.id}'
-                                channelName = '@' + channelName
-                                comment = message
-                                async with aiosqlite.connect('accounts.db')as db:
-                                    await db.execute("INSERT INTO comments(nickname, channel, comment, post) VALUES(?,?,?,?);",(self.session, channelName, comment, post))
-                                    await db.commit()
-                            except Exception as e:
-                                logging.info(f'Error!{e}')
+                                async with aiosqlite.connect("accounts.db")as db:
+                                    async with db.execute("SELECT hyperlink FROM users WHERE phoneNumber = ?;",(self.session,))as cur:
+                                        hyperlink = await cur.fetchone()
+                                if hyperlink[0] != "-":
+                                    textToInsert = f'<a href="{hyperlink[0]}">Смотреть тут</a>'
+                                    message = "<span>" + message + "</span>" + f"\n{textToInsert}"
+                                downtimeToWait = getSetting('downtimeToWait')
+                                upTimeToWait = getSetting('uptimeToWait')
+                                logging.info('sending a message')
+                                await asyncio.sleep(random.randint(int(downtimeToWait),int(upTimeToWait)))
+                                await self.client.send_message(entity=channel, message=message, comment_to=event,parse_mode = "html")
+                                try:
+                                    channelEntity = await self.client.get_entity(event.chat_id)
+                                    if channelEntity.username:
+                                        channelName = channelEntity.username
+                                    else:
+                                        channelName = channelEntity.usernames[0]
+                                    post = f't.me/{channelName}/{event.message.id}'
+                                    channelName = '@' + channelName
+                                    comment = message
+                                    async with aiosqlite.connect('accounts.db')as db:
+                                        await db.execute("INSERT INTO comments(nickname, channel, comment, post) VALUES(?,?,?,?);",(self.session, channelName, comment, post))
+                                        await db.commit()
+                                except Exception as e:
+                                    logging.info(f'Error!{e}')
                 except Exception as e:
                     logging.info(f'Error!{e}')
             else:
@@ -298,3 +299,6 @@ class UserChecking:
     def stop(self):
         self.client.disconnect()
         self.thread.join()
+
+
+chatGPTTG: ChatGPTTG | None = ChatGPTTG()
