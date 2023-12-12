@@ -34,3 +34,6 @@ class HyperlinkForm(StatesGroup):
 
 class OpenAIKeyForm(StatesGroup):
     api_key = State()
+
+class ProxyForm(StatesGroup):
+    proxy = State()

@@ -40,7 +40,7 @@ keyboardMain = ReplyKeyboardMarkup(keyboard=[
 keyboardSettings = ReplyKeyboardMarkup(keyboard=[
     ["Изменить шанс комментирования","Изменить время ожидания","Изменить запрос к chatgpt"],
     ["Изменить минимальное кол-во символов в комментарии",'Изменить/удалить гиперссылку'],
-    ['Изменить API ключ'],
+    ['Изменить API ключ',"Изменить прокси для запроса к chatgpt"],
     ['Назад']
 ], resize_keyboard=True)
 
@@ -69,6 +69,17 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 @dp.message_handler(Text(equals='Изменить настройки'))
 async def getSettings(message: types.Message):
     await message.answer(text='Выберите необходимую опцию', reply_markup=keyboardSettings)
+
+@dp.message_handler(Text(equals="Изменить прокси для запроса к chatgpt"))
+async def change_proxy_for_gpt(message: types.Message):
+    await ProxyForm.proxy.set()
+    await message.answer(text='Напишите данные от HTTP прокси в формате ЛОГИН:ПАРОЛЬ@IP:ПОРТ', reply_markup=keyboardCancel)
+
+
+@dp.message_handler(state=ProxyForm.proxy)
+async def process_proxy(message: types.Message, state: FSMContext):
+    setSetting('proxy', message.text.strip())
+    await message.answer(text='Готово!', reply_markup=keyboardMain)
 
 @dp.message_handler(Text(equals='Назад'))
 async def getBack(message: types.Message):
