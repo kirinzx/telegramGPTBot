@@ -1,39 +1,43 @@
 import aiosqlite
-import threading
-from aiogram import Dispatcher, types
-from aiogram.types import CallbackQuery
 from itertools import islice
-from typing import Iterable, Any, Iterator, Callable, Coroutine
+from typing import Iterable, Any, Iterator, Callable, Coroutine, List
+from telethon import TelegramClient, events, functions
+import telethon
 from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher.filters.state import State
 from aiogram.dispatcher import FSMContext
-from telethon import TelegramClient, events, errors
+from aiogram import Dispatcher, types
+from aiogram.types import CallbackQuery
 import asyncio
 import random
-from chatGPTReq import req
 from config import getSetting
 import python_socks
 import async_timeout
 import socks
 import logging
+from chatGPTReq import req
+
 
 class User:
-    def __init__(self,phoneNumber,app_id,app_hash,ip,port,login,password):
+    def __init__(self, phoneNumber, app_id, app_hash, message=None, chatgpt=False, hyperlink=None, proxy_ip=None, proxy_port=None, proxy_login=None, proxy_password=None):
         self.phoneNumber = phoneNumber
         self.app_id = app_id
         self.app_hash = app_hash
-        self.ip = ip
-        self.port = port
-        self.login = login
-        self.password = password
+        self.message = message
+        self.chatgpt = chatgpt
+        self.hyperlink = hyperlink
+        self.proxy_ip = proxy_ip
+        self.proxy_port = proxy_port
+        self.proxy_login = proxy_login
+        self.proxy_password = proxy_password
+
 
 class Paginator:
     def __init__(
             self,
             data: types.InlineKeyboardMarkup |
-                  Iterable[types.InlineKeyboardButton] |
-                  Iterable[Iterable[types.InlineKeyboardButton]]
-            ,
+        Iterable[types.InlineKeyboardButton] |
+        Iterable[Iterable[types.InlineKeyboardButton]],
             state: State = None,
             callback_startswith: str = 'page_',
             size: int = 8,
@@ -99,7 +103,8 @@ class Paginator:
             page_separator=self.page_separator,
             startswith=self._startswith
         )
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[*_list_current_page, paginations])
+        keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[*_list_current_page, paginations])
 
         # keyboard.add(_list_current_page)
         # keyboard.row(paginations)
@@ -210,91 +215,134 @@ class Paginator:
             )
 
 
-class UserChecking:
-    def __init__(self,session, app_id, app_hash,ip,port,login,password):
-        self.session = session
-        self.event = threading.Event()
-        self.app_id = app_id
-        self.app_hash = app_hash
-        if ip != "-" and port != "-" and login != "-" and password != "-":
-            self.proxy = (python_socks.ProxyType.SOCKS5,ip,port,True,login,password)
+class MessageSender:
+    def __init__(self, phone_number: str, api_id: int | str, api_hash: str, message=None, chatgpt=False, hyperlink=None, proxy_ip=None, proxy_port=None, proxy_login=None, proxy_password=None, loop=None):
+        self.phone_number = phone_number
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.message = message
+        self.hyperlink = hyperlink
+        self.chagpt = chatgpt
+        self.chat = getSetting('tgstat_chat')
+        if proxy_ip is not None and proxy_port is not None and proxy_login is not None and proxy_password is not None:
+            self.proxy = (python_socks.ProxyType.SOCKS5, proxy_ip,
+                          proxy_port, True, proxy_login, proxy_password)
         else:
             self.proxy = None
-        self.channels = []
-        self.thread = threading.Thread(target=self.setClient, args=(self.session, self.app_id, self.app_hash),
-                                       name=f"user_{self.session}-Thread")
-        self.thread.start()
-    async def getChannels(self):
-        while True:
-            tmpDialogs = []
-            tmpDialogsIds = []
+
+        self.loop: asyncio.AbstractEventLoop = loop
+        senders.append(self)
+        self.loop.create_task(self.__set_client())
+
+    async def __set_client(self):
+        self.client = TelegramClient(
+            session=f'sessions/{self.phone_number}', api_id=int(self.api_id), api_hash=self.api_hash,
+            system_version='IOS 14', device_model='iPhone 14', loop=self.loop
+        )
+        if self.proxy is not None:
+            self.client.set_proxy(self.proxy)
+
+        await self.client.start()
+        if self.chat:
+            await self.set_chat_entity()
+
+    async def set_chat_entity(self):
+        self.client.remove_event_handler(self.getmsg)
+        chat_entity = await self.client.get_input_entity(self.chat)
+
+        self.client.add_event_handler(
+            self.getmsg, events.NewMessage(chats=chat_entity))
+
+    async def stop(self):
+        await self.client.disconnect()
+        senders.remove(self)
+
+    async def getmsg(self, event: telethon.events.NewMessage.Event):
+        try:
+            link_msg = event.message.message[event.message.message.index(
+                't.me'):event.message.message.index('\n\n')]
+            link_lst = link_msg.split('/')
+            message_id = link_lst.pop(-1)
+            link = '/'.join(link_lst)
+        except Exception as e:
+            logging.info(f'error in getmsg in {self.phone_number}. {e}')
+            return
+
+        if not message_id:
+            return
+        if not link:
+            return
+        try:
+            await self.comment(message_id, link)
+        except Exception as e:
+            logging.info(f'Error in comment in {self.phone_number}. {e}')
+
+    async def comment(self, message_id, link):
+
+        chat = await self.client.get_input_entity(link)
+        message = await self.client.get_messages(chat, ids=int(message_id))
+        if self.message or self.chagpt:
             try:
-                for dialog in await self.client.get_dialogs():
-                    if dialog.is_channel:
-                        tmpDialogs.append(dialog)
-                        tmpDialogsIds.append(dialog.id)
-                for i in range(len(tmpDialogsIds)):
-                    if not tmpDialogsIds[i] in self.channels:
-                        self.channels.append(tmpDialogsIds[i])
-                        await self.checkPosts(tmpDialogs[i])
-                for channel in self.channels:
-                    if not channel in tmpDialogsIds:
-                        self.channels.remove(channel)
-            except Exception as e:
-                logging.info(f'Error!{e}')
-            await asyncio.sleep(10)
+                await self.client(functions.channels.JoinChannelRequest(chat))
+            except:
+                pass
 
-    async def checkPosts(self, channel):
-        @self.client.on(events.NewMessage(chats=channel.id))
-        async def handler(event: events.NewMessage.Event):
-            if channel.id in self.channels:
-                try:
-                    chance = getSetting('chanceToComment')
-                    if random.random() <= float(int(chance) / 100):
-                        message = await req(event.text)
-                        minSymbols = getSetting('minSymbols')
-                        if len(message) >= int(minSymbols):
+        if self.message:
+            await self.text_message(chat, message, link)
 
-                            async with aiosqlite.connect("accounts.db")as db:
-                                async with db.execute("SELECT hyperlink FROM users WHERE phoneNumber = ?;",(self.session,))as cur:
-                                    hyperlink = await cur.fetchone()
-                            if hyperlink[0] != "-":
-                                textToInsert = f'<a href="{hyperlink[0]}">Смотреть тут</a>'
-                                message = "<span>" + message + "</span>" + f"\n{textToInsert}"
-                            downtimeToWait = getSetting('downtimeToWait')
-                            upTimeToWait = getSetting('uptimeToWait')
-                            logging.info('sending a message')
-                            await asyncio.sleep(random.randint(int(downtimeToWait),int(upTimeToWait)))
-                            await self.client.send_message(entity=channel, message=message, comment_to=event,parse_mode = "html")
-                            try:
-                                channelEntity = await self.client.get_entity(event.chat_id)
-                                if channelEntity.username:
-                                    channelName = channelEntity.username
-                                else:
-                                    channelName = channelEntity.usernames[0]
-                                post = f't.me/{channelName}/{event.message.id}'
-                                channelName = '@' + channelName
-                                comment = message
-                                async with aiosqlite.connect('accounts.db')as db:
-                                    await db.execute("INSERT INTO comments(nickname, channel, comment, post) VALUES(?,?,?,?);",(self.session, channelName, comment, post))
-                                    await db.commit()
-                            except Exception as e:
-                                logging.info(f'Error!{e}')
-                except Exception as e:
-                    logging.info(f'Error!{e}')
-            else:
-                return
+        if self.chagpt:
+            await self.text_message_via_gpt(chat, message, link)
 
-    def setClient(self,session, app_id, app_hash):
-        loop = asyncio.SelectorEventLoop()
-        asyncio.set_event_loop(loop)
-        if self.proxy:
-            self.client = TelegramClient(session=f"sessions/{session}", api_id=int(app_id), api_hash=app_hash, loop=loop, proxy=self.proxy,app_version="4.0",system_version="IOS 14",device_model="iPhone 14")
-        else:
-            self.client = TelegramClient(session=f"sessions/{session}", api_id=int(app_id), api_hash=app_hash, loop=loop, app_version="4.0",system_version="IOS 14",device_model="iPhone 14")
-        self.client.start()
-        self.client.loop.run_until_complete(self.getChannels())
+    async def text_message(self, chat: telethon.types.InputChannel, message: telethon.types.Message, link):
+        try:
+            chance = getSetting('chanceToComment')
+            if random.random() <= float(int(chance) / 100):
+                downtimeToWait = getSetting('downtimeToWait')
+                upTimeToWait = getSetting('uptimeToWait')
 
-    def stop(self):
-        self.client.disconnect()
-        self.thread.join()
+                await asyncio.sleep(random.randint(int(downtimeToWait), int(upTimeToWait)))
+                await self.client.send_message(chat, self.message, comment_to=message.id, parse_mode='html')
+                await self.save_to_db(link)
+
+        except Exception as e:
+            logging.info(f'Error in text_messagse. {e}')
+
+    async def save_to_db(self, post, message=None):
+        if message is None:
+            message = self.message
+        async with aiosqlite.connect('accounts.db')as db:
+            await db.execute("INSERT INTO comments(phone_number, comment, post) VALUES(?,?,?);", (self.phone_number, message, post))
+            await db.commit()
+
+    async def text_message_via_gpt(self, chat: telethon.types.InputChannel, message: telethon.types.Message, link):
+        try:
+
+            chance = getSetting('chanceToComment')
+            if random.random() <= float(int(chance) / 100):
+
+                comment = await req(message.message)
+                if not comment:
+                    return
+
+                async with aiosqlite.connect("accounts.db")as db:
+                    async with db.execute("SELECT hyperlink FROM users WHERE phoneNumber = ?;", (self.phone_number,))as cur:
+                        hyperlink = await cur.fetchone()
+
+                if hyperlink[0] is not None:
+                    textToInsert = f'<a href="{hyperlink[0]}">Смотреть тут</a>'
+                    comment = "<span>" + comment + \
+                        "</span>" + f"\n{textToInsert}"
+
+                downtimeToWait = getSetting('downtimeToWait')
+                upTimeToWait = getSetting('uptimeToWait')
+
+                await asyncio.sleep(random.randint(int(downtimeToWait), int(upTimeToWait)))
+                await self.client.send_message(entity=chat, message=comment, comment_to=message.id, parse_mode="html")
+
+                await self.save_to_db(link, comment)
+
+        except Exception as e:
+            logging.info(f'Error!{e}')
+
+
+senders: List[MessageSender] = []

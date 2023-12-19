@@ -1,31 +1,34 @@
 from telegramBot import main as tgMain
 import threading
 import sqlite3
-from classes import UserChecking
-from typing import List
+from classes import MessageSender
 import logging
+import asyncio
 
-usersToCheck : List[UserChecking] = []
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    tgBot = threading.Thread(target=tgMain,name="tgBot-Thread")
+    loop = asyncio.new_event_loop()
+    tgBot = threading.Thread(target=tgMain, name="tgBot-Thread", args=(loop,))
     tgBot.start()
     con = sqlite3.connect("accounts.db")
     cur = con.cursor()
     cur.execute(
-        'CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, phoneNumber TEXT NOT NULL UNIQUE, app_id TEXT NOT NULL UNIQUE, app_hash TEXT NOT NULL UNIQUE, IP TEXT, PORT INTEGER, login TEXT, password TEXT, hyperlink TEXT default "-");')
+        'CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, phoneNumber TEXT NOT NULL UNIQUE, app_id TEXT NOT NULL\
+        UNIQUE, app_hash TEXT NOT NULL UNIQUE, message TEXT, chatgpt INTEGER NOT NULL, hyperlink TEXT, IP TEXT, PORT INTEGER, login TEXT, password TEXT);')
     cur.execute(
         "CREATE TABLE IF NOT EXISTS admins(id INTEGER PRIMARY KEY, phoneNumber TEXT NOT NULL UNIQUE, adminId TEXT NOT NULL UNIQUE);"
     )
     cur.execute(
-        "CREATE TABLE IF NOT EXISTS comments(id INTEGER PRIMARY KEY, nickname TEXT NOT NULL, channel TEXT NOT NULL, comment TEXT NOT NULL, post TEXT NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS comments(id INTEGER PRIMARY KEY, phone_number TEXT NOT NULL, comment TEXT NOT NULL, post TEXT NOT NULL);"
     )
     con.commit()
-    for row in cur.execute("SELECT phoneNumber,app_id,app_hash,IP,PORT,login,password FROM users"):
-        usersToCheck.append(UserChecking(row[0],row[1],row[2],row[3],row[4],row[5],row[6]))
+    for row in cur.execute("SELECT phoneNumber, app_id, app_hash, message, chatgpt, hyperlink, IP, PORT, login, password FROM users"):
+        MessageSender(row[0], row[1], row[2], row[3],
+                      row[4], row[5], row[6], row[7], row[8], row[9], loop)
     con.close()
     tgBot.join()
+
 
 if __name__ == "__main__":
     main()
