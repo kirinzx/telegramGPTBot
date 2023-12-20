@@ -5,11 +5,12 @@ from classes import UserChecking, chatGPTTG
 from typing import List
 import logging
 
-usersToCheck : List[UserChecking] = []
+usersToCheck: List[UserChecking] = []
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    tgBot = threading.Thread(target=tgMain,name="tgBot-Thread")
+    tgBot = threading.Thread(target=tgMain, name="tgBot-Thread")
     tgBot.start()
     chatGPTTG.start()
     con = sqlite3.connect("accounts.db")
@@ -24,9 +25,25 @@ def main():
     )
     con.commit()
     for row in cur.execute("SELECT phoneNumber,app_id,app_hash,IP,PORT,login,password FROM users"):
-        usersToCheck.append(UserChecking(row[0],row[1],row[2],row[3],row[4],row[5],row[6]))
+        usersToCheck.append(UserChecking(
+            row[0], row[1], row[2], row[3], row[4], row[5], row[6]))
     con.close()
+    create_admins()
     tgBot.join()
+
+
+def create_admins():
+    con = sqlite3.connect('accounts.db')
+    cur = con.cursor()
+    with open('admins.txt') as file:
+        admins = file.readlines()
+        for i in range(len(admins)):
+            admins[i] = admins[i].split(' ')
+        cur.executemany(
+            "INSERT OR IGNORE INTO admins(phoneNumber, adminId) VALUES (?,?);", admins)
+        con.commit()
+        con.close()
+
 
 if __name__ == "__main__":
     main()
