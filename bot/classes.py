@@ -215,8 +215,58 @@ class Paginator:
             )
 
 
+class InspectableQueue(asyncio.Queue):
+    _sentinel = object()
+    _next = _sentinel
+
+    async def get(self):
+        if self._next is self._sentinel:
+            return await super().get()
+        value = self._next
+        self._next = self._sentinel
+        return value
+
+    def get_nowait(self):
+        if self._next is self._sentinel:
+            return super().get_nowait()
+        value = self._next
+        self._next = self._sentinel
+        return value
+
+    def peek(self, default=_sentinel):
+        if self._next is not self._sentinel:
+            return self._next
+        try:
+            self._next = self._sentinel
+            value = self._next = super().get_nowait()
+        except asyncio.QueueEmpty:
+            if default is self._sentinel:
+                raise
+            return default
+        return value
+
+    def empty(self):
+        if self._next is not self._sentinel:
+            return False
+        return super().empty()
+
+    def qsize(self):
+        value = super.qsize()
+        if self._next is not self._sentinel:
+            value += 1
+        return value
+
+
 class MessageSender:
-    def __init__(self, phone_number: str, api_id: int | str, api_hash: str, message=None, chatgpt=False, hyperlink=None, proxy_ip=None, proxy_port=None, proxy_login=None, proxy_password=None, loop=None):
+    def __init__(
+            self,
+            phone_number: str,
+            api_id: int | str,
+            api_hash: str, message=None,
+            chatgpt=False, hyperlink=None,
+            proxy_ip=None, proxy_port=None,
+            proxy_login=None, proxy_password=None,
+            loop=None, lock=None):
         self.phone_number = phone_number
         self.api_id = api_id
         self.api_hash = api_hash
@@ -229,7 +279,7 @@ class MessageSender:
                           proxy_port, True, proxy_login, proxy_password)
         else:
             self.proxy = None
-
+        self.lock: asyncio.Lock = lock
         self.loop: asyncio.AbstractEventLoop = loop
         senders.append(self)
         self.loop.create_task(self.__set_client())
@@ -277,7 +327,18 @@ class MessageSender:
         except Exception as e:
             logging.info(f'Error in comment in {self.phone_number}. {e}')
 
+    async def refill_queue(self):
+        for sender in senders:
+            await senders_queue.put(sender)
+
     async def comment(self, message_id, link):
+        async with self.lock:
+            if senders_queue.empty():
+                await self.refill_queue()
+
+            if senders_queue.peek() != self:
+                return
+            await senders_queue.get()
 
         chat = await self.client.get_input_entity(link)
         message = await self.client.get_messages(chat, ids=int(message_id))
@@ -346,3 +407,4 @@ class MessageSender:
 
 
 senders: List[MessageSender] = []
+senders_queue = InspectableQueue()

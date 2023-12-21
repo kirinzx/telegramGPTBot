@@ -48,6 +48,7 @@ keyboardSettings = ReplyKeyboardMarkup(keyboard=[
 client: TelegramClient = None
 user: User = None
 phoneNumber = None
+lock = None
 
 
 @dp.message_handler(commands="start")
@@ -672,6 +673,7 @@ async def process_password(message: types.Message, state: FSMContext):
 
 
 async def saveUser(message: types.Message, state: FSMContext):
+    global lock
     try:
         await client.disconnect()
         async with aiosqlite.connect("accounts.db") as db:
@@ -687,7 +689,7 @@ async def saveUser(message: types.Message, state: FSMContext):
         MessageSender(
             user.phoneNumber, user.app_id, user.app_hash,
             user.message, user.chatgpt, user.hyperlink, user.proxy_ip, user.proxy_port,
-            user.proxy_login, user.proxy_password, asyncio.get_event_loop()
+            user.proxy_login, user.proxy_password, asyncio.get_event_loop(), lock
         )
         await message.answer("Готово!", reply_markup=keyboardMain)
         await state.finish()
@@ -709,7 +711,9 @@ async def removeSessionFile(sessionName):
         pass
 
 
-def main(loop: asyncio.AbstractEventLoop):
+def main(loop: asyncio.AbstractEventLoop, lock_):
+    global lock
+    lock = lock_
     asyncio.set_event_loop(loop)
     dp.middleware.setup(AdminMiddleware())
 

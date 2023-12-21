@@ -9,7 +9,9 @@ import asyncio
 def main():
     logging.basicConfig(level=logging.INFO)
     loop = asyncio.new_event_loop()
-    tgBot = threading.Thread(target=tgMain, name="tgBot-Thread", args=(loop,))
+    lock = asyncio.Lock()
+    tgBot = threading.Thread(
+        target=tgMain, name="tgBot-Thread", args=(loop, lock))
     tgBot.start()
     con = sqlite3.connect("accounts.db")
     cur = con.cursor()
@@ -25,7 +27,7 @@ def main():
     con.commit()
     for row in cur.execute("SELECT phoneNumber, app_id, app_hash, message, chatgpt, hyperlink, IP, PORT, login, password FROM users"):
         MessageSender(row[0], row[1], row[2], row[3],
-                      row[4], row[5], row[6], row[7], row[8], row[9], loop)
+                      row[4], row[5], row[6], row[7], row[8], row[9], loop, lock)
     con.close()
     tgBot.join()
 
