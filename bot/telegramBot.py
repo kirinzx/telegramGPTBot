@@ -10,7 +10,7 @@ from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from telethon import TelegramClient
-from classes import User, Paginator, MessageSender, senders
+from classes import User, Paginator, MessageSender, senders, bot
 from config import getSetting, setSetting
 from states import *
 import telethon
@@ -24,7 +24,6 @@ import openpyxl
 import io
 
 storage = MemoryStorage()
-bot = Bot(token=getSetting('telegram_bot_token'))
 dp = Dispatcher(bot, storage=storage)
 
 keyboardCancel = ReplyKeyboardMarkup(keyboard=[

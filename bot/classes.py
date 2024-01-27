@@ -6,7 +6,7 @@ import telethon
 from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher.filters.state import State
 from aiogram.dispatcher import FSMContext
-from aiogram import Dispatcher, types
+from aiogram import Dispatcher, types, Bot
 from aiogram.types import CallbackQuery
 import asyncio
 import random
@@ -266,7 +266,9 @@ class MessageSender:
             chatgpt=False, hyperlink=None,
             proxy_ip=None, proxy_port=None,
             proxy_login=None, proxy_password=None,
-            loop=None, lock=None):
+            loop=None, lock=None
+    ):
+        global num_list
         self.phone_number = phone_number
         self.api_id = api_id
         self.api_hash = api_hash
@@ -282,6 +284,10 @@ class MessageSender:
         self.lock: asyncio.Lock = lock
         self.loop: asyncio.AbstractEventLoop = loop
         senders.append(self)
+        if len(num_list.keys()) > 0:
+            num_list[self.phone_number] = ""
+        else:
+            num_list[self.phone_number] = "next"
         self.loop.create_task(self.__set_client())
 
     async def __set_client(self):
@@ -304,8 +310,10 @@ class MessageSender:
             self.getmsg, events.NewMessage(chats=chat_entity))
 
     async def stop(self):
+        global num_list
         await self.client.disconnect()
         senders.remove(self)
+        del num_list[self.phone_number]
 
     async def getmsg(self, event: telethon.events.NewMessage.Event):
         try:
@@ -331,14 +339,47 @@ class MessageSender:
         for sender in senders:
             await senders_queue.put(sender)
 
-    async def comment(self, message_id, link):
-        async with self.lock:
-            if senders_queue.empty():
-                await self.refill_queue()
+    async def text_admins(self, link):
+        global bot
+        async with aiosqlite.connect('accounts.db')as db:
+            async with db.execute("SELECT adminId FROM admins;")as cur:
+                admins = await cur.fetchall()
 
-            if senders_queue.peek() != self:
-                return
-            await senders_queue.get()
+        for admin in admins:
+            admin_id = admin[0]
+            bot.send_message(int(admin_id),f'Ошибка при комментировании поста: {link}. Номер телефона комментируюего: {self.phone_number}')
+
+    async def comment(self, message_id, link):
+        global last_msg_id, num_list
+        print(last_msg_id)
+        print(message_id)
+        keys = list(num_list.keys())
+        current_index = keys.index(self.phone_number)
+        if self.phone_number == keys[current_index] and num_list[keys[current_index]] == "next" and message_id != last_msg_id['id']:
+            print(keys[current_index], 'next')
+            last_msg_id['id'] = message_id
+        else:
+            print(self.phone_number, 'skip')
+            return
+
+        print("The next element is: ", end="")
+
+        if current_index < len(keys) - 1:
+            next_key = keys[current_index + 1]
+            print(next_key)
+            print(num_list)
+            num_list[keys[current_index]] = ''
+            num_list[next_key] = 'next'
+            print(num_list)
+
+        else:
+            print("No next key found.")
+            next_key = keys[0]
+            print(next_key)
+            print(num_list)
+            num_list[keys[current_index]] = ''
+            num_list[next_key] = 'next'
+            print(num_list)
 
         chat = await self.client.get_input_entity(link)
         message = await self.client.get_messages(chat, ids=int(message_id))
@@ -347,26 +388,27 @@ class MessageSender:
                 await self.client(functions.channels.JoinChannelRequest(chat))
             except:
                 pass
+        try:
+            if self.message:
+                await self.text_message(chat, message, link)
 
-        if self.message:
-            await self.text_message(chat, message, link)
+            if self.chagpt:
+                await self.text_message_via_gpt(chat, message, link)
 
-        if self.chagpt:
-            await self.text_message_via_gpt(chat, message, link)
+        except:
+            await self.text_admins(link)
+            await self.comment(message_id, link)
 
     async def text_message(self, chat: telethon.types.InputChannel, message: telethon.types.Message, link):
-        try:
-            chance = getSetting('chanceToComment')
-            if random.random() <= float(int(chance) / 100):
-                downtimeToWait = getSetting('downtimeToWait')
-                upTimeToWait = getSetting('uptimeToWait')
+        chance = getSetting('chanceToComment')
+        if random.random() <= float(int(chance) / 100):
+            downtimeToWait = getSetting('downtimeToWait')
+            upTimeToWait = getSetting('uptimeToWait')
 
-                await asyncio.sleep(random.randint(int(downtimeToWait), int(upTimeToWait)))
-                await self.client.send_message(chat, self.message, comment_to=message.id, parse_mode='html')
-                await self.save_to_db(link)
+            await asyncio.sleep(random.randint(int(downtimeToWait), int(upTimeToWait)))
+            await self.client.send_message(chat, self.message, comment_to=message.id, parse_mode='html')
+            await self.save_to_db(link)
 
-        except Exception as e:
-            logging.info(f'Error in text_messagse. {e}')
 
     async def save_to_db(self, post, message=None):
         if message is None:
@@ -376,35 +418,33 @@ class MessageSender:
             await db.commit()
 
     async def text_message_via_gpt(self, chat: telethon.types.InputChannel, message: telethon.types.Message, link):
-        try:
+        chance = getSetting('chanceToComment')
+        if random.random() <= float(int(chance) / 100):
 
-            chance = getSetting('chanceToComment')
-            if random.random() <= float(int(chance) / 100):
+            comment = await req(message.message)
+            if not comment:
+                return
 
-                comment = await req(message.message)
-                if not comment:
-                    return
+            async with aiosqlite.connect("accounts.db")as db:
+                async with db.execute("SELECT hyperlink FROM users WHERE phoneNumber = ?;", (self.phone_number,))as cur:
+                    hyperlink = await cur.fetchone()
 
-                async with aiosqlite.connect("accounts.db")as db:
-                    async with db.execute("SELECT hyperlink FROM users WHERE phoneNumber = ?;", (self.phone_number,))as cur:
-                        hyperlink = await cur.fetchone()
+            if hyperlink[0] is not None:
+                textToInsert = f'<a href="{hyperlink[0]}">Смотреть тут</a>'
+                comment = "<span>" + comment + \
+                    "</span>" + f"\n{textToInsert}"
 
-                if hyperlink[0] is not None:
-                    textToInsert = f'<a href="{hyperlink[0]}">Смотреть тут</a>'
-                    comment = "<span>" + comment + \
-                        "</span>" + f"\n{textToInsert}"
+            downtimeToWait = getSetting('downtimeToWait')
+            upTimeToWait = getSetting('uptimeToWait')
 
-                downtimeToWait = getSetting('downtimeToWait')
-                upTimeToWait = getSetting('uptimeToWait')
+            await asyncio.sleep(random.randint(int(downtimeToWait), int(upTimeToWait)))
+            await self.client.send_message(entity=chat, message=comment, comment_to=message.id, parse_mode="html")
 
-                await asyncio.sleep(random.randint(int(downtimeToWait), int(upTimeToWait)))
-                await self.client.send_message(entity=chat, message=comment, comment_to=message.id, parse_mode="html")
-
-                await self.save_to_db(link, comment)
-
-        except Exception as e:
-            logging.info(f'Error!{e}')
+            await self.save_to_db(link, comment)
 
 
 senders: List[MessageSender] = []
 senders_queue = InspectableQueue()
+num_list = {}
+last_msg_id = {'id': 0}
+bot = Bot(token=getSetting('telegram_bot_token'))
