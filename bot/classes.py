@@ -251,7 +251,7 @@ class InspectableQueue(asyncio.Queue):
         return super().empty()
 
     def qsize(self):
-        value = super.qsize()
+        value = super().qsize()
         if self._next is not self._sentinel:
             value += 1
         return value
@@ -268,7 +268,6 @@ class MessageSender:
             proxy_login=None, proxy_password=None,
             loop=None, lock=None
     ):
-        global num_list
         self.phone_number = phone_number
         self.api_id = api_id
         self.api_hash = api_hash
@@ -284,10 +283,6 @@ class MessageSender:
         self.lock: asyncio.Lock = lock
         self.loop: asyncio.AbstractEventLoop = loop
         senders.append(self)
-        if len(num_list.keys()) > 0:
-            num_list[self.phone_number] = ""
-        else:
-            num_list[self.phone_number] = "next"
         self.loop.create_task(self.__set_client())
 
     async def __set_client(self):
@@ -297,8 +292,11 @@ class MessageSender:
         )
         if self.proxy is not None:
             self.client.set_proxy(self.proxy)
-
+        await senders_queue.put(self)
         await self.client.start()
+        me_ = await self.client.get_me(input_peer=True)
+        self.id_ = me_.user_id
+        senders_ids.append(self.id_)
         if self.chat:
             await self.set_chat_entity()
 
@@ -310,10 +308,9 @@ class MessageSender:
             self.getmsg, events.NewMessage(chats=chat_entity))
 
     async def stop(self):
-        global num_list
         await self.client.disconnect()
         senders.remove(self)
-        del num_list[self.phone_number]
+        senders_ids.remove(self.id_)
 
     async def getmsg(self, event: telethon.events.NewMessage.Event):
         try:
@@ -330,12 +327,14 @@ class MessageSender:
             return
         if not link:
             return
-        try:
-            await self.comment(message_id, link)
-        except Exception as e:
-            logging.info(f'Error in comment in {self.phone_number}. {e}')
+        #try:
+        await self.comment(message_id, link)
+        # except Exception as e:
+        #     logging.info(f'Error in comment in {self.phone_number}. {e}')
 
     async def refill_queue(self):
+        global senders_queue
+        senders_queue = InspectableQueue()
         for sender in senders:
             await senders_queue.put(sender)
 
@@ -347,57 +346,67 @@ class MessageSender:
 
         for admin in admins:
             admin_id = admin[0]
-            bot.send_message(int(admin_id),f'Ошибка при комментировании поста: {link}. Номер телефона комментируюего: {self.phone_number}')
+            await bot.send_message(int(admin_id),f'Ошибка при комментировании поста: {link}. Номер телефона комментируюего: {self.phone_number}')
 
-    async def comment(self, message_id, link):
-        global last_msg_id, num_list
-        print(last_msg_id)
-        print(message_id)
-        keys = list(num_list.keys())
-        current_index = keys.index(self.phone_number)
-        if self.phone_number == keys[current_index] and num_list[keys[current_index]] == "next" and message_id != last_msg_id['id']:
-            print(keys[current_index], 'next')
-            last_msg_id['id'] = message_id
-        else:
-            print(self.phone_number, 'skip')
+    async def comment(self, message_id, link, try_num=1):
+        global senders_queue
+        if try_num > len(senders):
             return
-
-        print("The next element is: ", end="")
-
-        if current_index < len(keys) - 1:
-            next_key = keys[current_index + 1]
-            print(next_key)
-            print(num_list)
-            num_list[keys[current_index]] = ''
-            num_list[next_key] = 'next'
-            print(num_list)
-
-        else:
-            print("No next key found.")
-            next_key = keys[0]
-            print(next_key)
-            print(num_list)
-            num_list[keys[current_index]] = ''
-            num_list[next_key] = 'next'
-            print(num_list)
-
-        chat = await self.client.get_input_entity(link)
-        message = await self.client.get_messages(chat, ids=int(message_id))
-        if self.message or self.chagpt:
+        target = senders_queue.peek()
+        if target is None:
+            return
+        logging.info(f"{self.phone_number} peeked {target}")
+        if target != self:
+            logging.info(f"{self.phone_number} left cause its not his turn")
+            await self.lock.acquire()
             try:
-                await self.client(functions.channels.JoinChannelRequest(chat))
-            except:
-                pass
+                if target not in senders:
+                    await self.refill_queue()
+                    for i in senders:
+                        await i.comment(message_id, link)
+                    return
+            finally:
+                if self.lock.locked():
+                    self.lock.release()
+            return
+        await asyncio.sleep(2)
+        await self.lock.acquire()
         try:
-            if self.message:
-                await self.text_message(chat, message, link)
+        #async with self.lock:
+            await senders_queue.get()
+            await senders_queue.put(self)
+            logging.info(f"queue {self.phone_number}: {senders_queue}")
+            
+            chat = await self.client.get_input_entity(link)
+            message: telethon.types.Message = await self.client.get_messages(chat, ids=int(message_id))
+            if isinstance(message.from_id, telethon.types.PeerUser):
+                if message.from_id.user_id in senders_ids:
+                    return
+            if self.message or self.chagpt:
+                try:
+                    await self.client(functions.channels.JoinChannelRequest(chat))
+                except:
+                    pass
+            if try_num > 1:
+                logging.info(f'commenting after fail {self.phone_number}')
+            else:
+                logging.info(f'commenting {self.phone_number} post: {message_id}')
+            try:
+                if self.message:
+                    await self.text_message(chat, message, link)
 
-            if self.chagpt:
-                await self.text_message_via_gpt(chat, message, link)
-
-        except:
-            await self.text_admins(link)
-            await self.comment(message_id, link)
+                if self.chagpt:
+                    await self.text_message_via_gpt(chat, message, link)
+            except:
+                logging.info(f"{self.phone_number} is failed. passing comment to another user")
+                await self.text_admins(f"{link}/{message.id}")
+                next_user: MessageSender = senders_queue.peek()
+                if next_user:
+                    self.lock.release()
+                    await next_user.comment(message_id, link, try_num=try_num+1)
+        finally:
+            if self.lock.locked():
+                self.lock.release()
 
     async def text_message(self, chat: telethon.types.InputChannel, message: telethon.types.Message, link):
         chance = getSetting('chanceToComment')
@@ -407,7 +416,7 @@ class MessageSender:
 
             await asyncio.sleep(random.randint(int(downtimeToWait), int(upTimeToWait)))
             await self.client.send_message(chat, self.message, comment_to=message.id, parse_mode='html')
-            await self.save_to_db(link)
+            await self.save_to_db(f"{link}/{message.id}")
 
 
     async def save_to_db(self, post, message=None):
@@ -440,11 +449,13 @@ class MessageSender:
             await asyncio.sleep(random.randint(int(downtimeToWait), int(upTimeToWait)))
             await self.client.send_message(entity=chat, message=comment, comment_to=message.id, parse_mode="html")
 
-            await self.save_to_db(link, comment)
+            await self.save_to_db(f"{link}/{message.id}", comment)
+
+    def __str__(self) -> str:
+        return f"{self.phone_number}"
 
 
 senders: List[MessageSender] = []
+senders_ids: List[int] = []
 senders_queue = InspectableQueue()
-num_list = {}
-last_msg_id = {'id': 0}
 bot = Bot(token=getSetting('telegram_bot_token'))
